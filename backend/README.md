@@ -9,7 +9,8 @@ The backend is the executable core of the project. It integrates sensors/actuato
 - `python3 -m backend.data.main --simulate` - no-hardware simulation (20 samples, progress printed)
 - Flags: `--simulate`, `--cycles N`, `--output PATH`, `--reflector-height METRES`
 - Real mode performs hardware preflight on the Pi: BCM pin validation, GPIO pin read test, device read test, then acquisition.
-- Simulation prints `t, x, y, d, theta_v, theta_h, yaw, h_ref, z` per sample and writes all fields to CSV; `h_ref` defaults to 1.5 m and odometry is simulated so `x/y` are populated.
+- Simulation prints `t, x, y, d, theta_v` (with tilt/pitch/offset breakdown), `theta_h, yaw, h_ref, z` per sample and writes all fields to CSV; `h_ref` defaults to 1.5 m and odometry is simulated so `x/y` are populated.
+- Elevation uses `theta_v = tilt_encoder + IMU_pitch + tilt_mount_offset_deg`; set the offset in `MappingConfig` to absorb fixed mounting error.
 
 ## OOP architecture
 ```text

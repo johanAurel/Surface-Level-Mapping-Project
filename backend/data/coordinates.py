@@ -4,7 +4,7 @@ PSEUDOCODE (matches described system):
     INPUTS:
         H_ref                = known reflector height
         d                    = LiDAR distance to reflector
-        theta_v (tilt)       = upward tilt positive
+        theta_v (tilt)       = turret tilt + IMU pitch + mounting offset (upward positive)
         theta_h (pan)        = horizontal turret angle
         robot_x, robot_y     = robot position in field/map frame (optional)
         robot_yaw            = robot heading from IMU (optional)
@@ -27,17 +27,25 @@ import math
 from typing import Mapping
 
 
-def calculate_robot_elevation(measurement: Mapping[str, float], reflector_height_m: float) -> dict:
+def calculate_robot_elevation(
+    measurement: Mapping[str, float],
+    reflector_height_m: float,
+    imu_pitch_deg: float = 0.0,
+    tilt_mount_offset_deg: float = 0.0,
+) -> dict:
     """Calculate robot elevation from a fixed reflector measurement.
 
     Formula from system description:
         z_robot = H_ref - d * sin(theta_v)
-    where upward tilt is positive.
+    where theta_v is the turret tilt plus IMU pitch and mounting offset.
     """
     # PSEUDOCODE: read required measurements.
     d = _num(measurement.get("lidar_distance", measurement.get("d_m", 0.0)))
-    theta_v_deg = _num(measurement.get("tilt_angle", measurement.get("theta_v", 0.0)))
+    theta_v_mechanical_deg = _num(measurement.get("tilt_angle", measurement.get("theta_v", 0.0)))
     theta_h_deg = _num(measurement.get("pan_angle", measurement.get("theta_h", 0.0)))
+    pitch_deg = _num(imu_pitch_deg)
+    offset_deg = _num(tilt_mount_offset_deg)
+    theta_v_deg = theta_v_mechanical_deg + pitch_deg + offset_deg
     theta_v = math.radians(theta_v_deg)
     theta_h = math.radians(theta_h_deg)
 
@@ -54,6 +62,9 @@ def calculate_robot_elevation(measurement: Mapping[str, float], reflector_height
         "reflector_height_m": float(reflector_height_m),
         "theta_v_deg": theta_v_deg,
         "theta_h_deg": theta_h_deg,
+        "theta_v_mechanical_deg": theta_v_mechanical_deg,
+        "imu_pitch_deg": pitch_deg,
+        "tilt_mount_offset_deg": offset_deg,
         "distance_to_reflector_m": d,
         "horizontal_distance_to_reflector_m": horizontal_distance,
         "z_robot_m": z_robot,

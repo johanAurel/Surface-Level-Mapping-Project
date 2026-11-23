@@ -64,6 +64,7 @@ class MappingConfig:
     tracking_deadband_px: float = 20.0
     pan_gain_deg_per_px: float = 0.01
     tilt_gain_deg_per_px: float = 0.01
+    tilt_mount_offset_deg: float = 0.0
     simulate: bool = False
 
 
@@ -292,6 +293,9 @@ class SurfaceMappingSystem:
             "distance_to_reflector_m",
             "theta_v_deg",
             "theta_h_deg",
+            "theta_v_mechanical_deg",
+            "imu_pitch_deg",
+            "tilt_mount_offset_deg",
             "horizontal_distance_to_reflector_m",
             "reflector_dx_local_m",
             "reflector_dy_local_m",
@@ -501,11 +505,19 @@ class SurfaceMappingSystem:
                     "distance_to_reflector_m": measurement.get("lidar_distance"),
                     "theta_v_deg": measurement.get("tilt_angle"),  # tilt accounted for
                     "theta_h_deg": measurement.get("pan_angle"),
+                    "theta_v_mechanical_deg": measurement.get("tilt_angle"),
+                    "imu_pitch_deg": measurement.get("pitch"),
+                    "tilt_mount_offset_deg": self.config.tilt_mount_offset_deg,
                     "z_robot_m": None,
                 })
                 return measurement
 
-            elev = calculate_robot_elevation(measurement, self.config.reflector_height_m)
+            elev = calculate_robot_elevation(
+                measurement,
+                self.config.reflector_height_m,
+                imu_pitch_deg=measurement.get("pitch"),
+                tilt_mount_offset_deg=self.config.tilt_mount_offset_deg,
+            )
             measurement.update(elev)
             # Explicitly keep tilt/pan used for derivation visible in the record.
             measurement["theta_v_deg"] = elev["theta_v_deg"]
@@ -552,6 +564,9 @@ class SurfaceMappingSystem:
             f"y={_fmt(measurement.get('platform_y'))} "
             f"d={_fmt(measurement.get('lidar_distance'))} "
             f"theta_v={_fmt(measurement.get('theta_v_deg'))} "
+            f"(tilt={_fmt(measurement.get('theta_v_mechanical_deg'))} "
+            f"pitch={_fmt(measurement.get('imu_pitch_deg'))} "
+            f"offset={_fmt(measurement.get('tilt_mount_offset_deg'))}) "
             f"theta_h={_fmt(measurement.get('theta_h_deg'))} "
             f"yaw={_fmt(measurement.get('yaw'))} "
             f"h_ref={_fmt(measurement.get('reflector_height_m'))} "

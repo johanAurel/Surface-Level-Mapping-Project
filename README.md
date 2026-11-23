@@ -29,7 +29,7 @@ Standalone demos/utilities (kept, not the main integrated loop): `backend/sensor
 - **IMU**: provides roll/pitch/yaw (`ImuOrientation`).
 - **2-axis turret**: pan/tilt angles `theta_h/theta_v` from actuator encoders; `PanTiltTurret` + `CycloidalActuator` provide integrated cycloidal pan/tilt tracking commands from camera pixel error.
 - **Raspberry Pi/controller**: `SurfaceMappingSystem` orchestrates read/track/compute/log.
-- **Primary elevation formula**: `z_robot = H_ref - d*sin(theta_v)` implemented in `backend/data/coordinates.py:calculate_robot_elevation()` and used by `SurfaceMappingSystem` in `reflector_elevation` mode.
+- **Primary elevation formula**: `z_robot = H_ref - d*sin(theta_v)`, with `theta_v = turret_tilt + IMU_pitch + tilt_mount_offset_deg`, implemented in `backend/data/coordinates.py:calculate_robot_elevation()` and used by `SurfaceMappingSystem` in `reflector_elevation` mode.
 - **Terrain-ready outputs**: timestamped `x,y,d,theta_v,theta_h,yaw,z_robot`/`point_z` CSV rows for field height map/DEM generation downstream, plus tracking vars (`tracking_active`, target/delta/clamped).
 
 ## Derived variables for terrain mapping
@@ -76,9 +76,9 @@ On a machine without Raspberry Pi hardware (e.g. WSL), use simulation mode:
 python3 -m backend.data.main --simulate --reflector-height 1.5
 ```
 
-Simulation defaults to `h_ref = 1.5 m` (override with `--reflector-height`) and simulates odometry so `x/y` are populated. Each sample is printed with `t, x, y, d, theta_v, theta_h, yaw, h_ref, z`; the CSV contains all 47 fields:
+Simulation defaults to `h_ref = 1.5 m` (override with `--reflector-height`) and simulates odometry so `x/y` are populated. Each sample prints `t, x, y, d, theta_v` with its tilt/pitch/offset breakdown, `theta_h, yaw, h_ref, z`; the CSV contains all 50 fields:
 ```text
-[simulate]   1 t=2026-11-23T15:35:32.601349+00:00 x=0.000 y=-0.000 d=2.482 theta_v=45.000 theta_h=0.000 yaw=-3.203 h_ref=1.500 z=-0.255
+[simulate]   1 t=2026-11-23T15:35:32.601349+00:00 x=0.000 y=-0.000 d=2.482 theta_v=45.900 (tilt=45.000 pitch=0.900 offset=0.000) theta_h=0.000 yaw=-3.203 h_ref=1.500 z=-0.269
 ```
 Simulation runs 20 samples and prints progress by default; pass `--cycles N` to change it (use `--cycles 0` for a continuous stream, stopped with Ctrl+C). Real hardware mode runs continuously unless `--cycles N` is given.
 
@@ -90,6 +90,7 @@ Output CSV default: `backend/data/surface_measurements.csv`.
 Edit `MappingConfig` in `backend/data/main.py`:
 - GPIO pins and encoder counts/rev
 - `wheel_circumference_m` for odometry
+- `tilt_mount_offset_deg` for fixed LiDAR/tilt mounting error (IMU pitch is added automatically)
 - sampling interval and output file
 - `require_reference_detection` if camera lock is mandatory
 
