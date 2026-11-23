@@ -6,6 +6,9 @@ The backend is the executable core of the project. It integrates sensors/actuato
 ## Entry points
 - `python3 -m backend.main` - recommended
 - `python3 -m backend.data.main` - direct orchestrator module
+- `python3 -m backend.data.main --simulate --cycles 10` - no-hardware simulation
+- Flags: `--simulate`, `--cycles N`, `--output PATH`, `--reflector-height METRES`
+- Real mode performs hardware preflight on the Pi: BCM pin validation, GPIO pin read test, device read test, then acquisition.
 
 ## OOP architecture
 ```text

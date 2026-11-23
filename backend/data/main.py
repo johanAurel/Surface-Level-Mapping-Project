@@ -21,6 +21,7 @@ This derives terrain-ready variables; it does not render terrain.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import math
 import time
@@ -54,6 +55,115 @@ class MappingConfig:
     tracking_deadband_px: float = 20.0
     pan_gain_deg_per_px: float = 0.01
     tilt_gain_deg_per_px: float = 0.01
+    simulate: bool = False
+
+
+@dataclass
+class _SimEncoder:
+    counts_per_rev: int
+    phase: float = 0.0
+    _start: float = field(default_factory=time.monotonic)
+
+    def read_counts(self) -> int:
+        degrees = math.sin((time.monotonic() - self._start) * 0.5 + self.phase) * 180.0
+        return int(degrees / 360.0 * self.counts_per_rev)
+
+    def read_degrees(self) -> float:
+        return self.read_counts() / self.counts_per_rev * 360.0
+
+    def close(self) -> None:
+        pass
+
+
+@dataclass
+class _SimActuatorReadings:
+    pan_encoder: _SimEncoder
+    tilt_encoder: _SimEncoder
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "pan_counts": self.pan_encoder.read_counts(),
+            "pan_degrees": self.pan_encoder.read_degrees(),
+            "tilt_counts": self.tilt_encoder.read_counts(),
+            "tilt_degrees": self.tilt_encoder.read_degrees(),
+        }
+
+    def close(self) -> None:
+        self.pan_encoder.close()
+        self.tilt_encoder.close()
+
+
+@dataclass
+class _SimSensorEncoder:
+    encoder: _SimEncoder
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "sensor_encoder_counts": self.encoder.read_counts(),
+            "sensor_encoder_degrees": self.encoder.read_degrees(),
+        }
+
+    def close(self) -> None:
+        self.encoder.close()
+
+
+@dataclass
+class _SimImuReading:
+    roll_deg: float
+    pitch_deg: float
+    yaw_deg: float
+    temperature_c: float
+
+
+class _SimImu:
+    def read(self) -> _SimImuReading:
+        t = time.monotonic()
+        return _SimImuReading(
+            roll_deg=math.sin(t * 0.3) * 2.0,
+            pitch_deg=math.cos(t * 0.3) * 2.0,
+            yaw_deg=math.sin(t * 0.1) * 10.0,
+            temperature_c=25.0,
+        )
+
+    def close(self) -> None:
+        pass
+
+
+@dataclass
+class _SimLidarReading:
+    distance_m: float | None
+    strength: int
+    quality: int
+    valid: bool
+
+
+class _SimLidar:
+    def read(self) -> _SimLidarReading:
+        distance = 2.0 + math.sin(time.monotonic() * 0.4) * 0.5
+        return _SimLidarReading(distance_m=distance, strength=500, quality=500, valid=True)
+
+    def close(self) -> None:
+        pass
+
+
+class _SimCamera:
+    def read(self) -> dict[str, Any]:
+        t = time.monotonic()
+        x_error = math.sin(t) * 40.0
+        y_error = math.cos(t) * 30.0
+        return {
+            "reference_detected": True,
+            "reference_x_px": 360.0 + x_error,
+            "reference_y_px": 180.0 + y_error,
+            "x_error_px": x_error,
+            "y_error_px": y_error,
+            "area_px": 500.0,
+            "frame_width": 720,
+            "frame_height": 360,
+        }
+
+    def close(self) -> None:
+        pass
 
 
 @dataclass
@@ -182,32 +292,100 @@ class SurfaceMappingSystem:
             "point_z",
         ]
 
+    @staticmethod
+    def require_raspberry_pi() -> None:
+        model = Path("/proc/device-tree/model")
+        if model.exists():
+            try:
+                if "Raspberry Pi" in model.read_text(errors="replace"):
+                    return
+            except OSError:
+                pass
+        raise RuntimeError("Real hardware mode requires a Raspberry Pi; use --simulate on this machine.")
+
+    def gpio_pins(self) -> dict[str, int]:
+        return {
+            "pan_a": self.config.pan_a,
+            "pan_b": self.config.pan_b,
+            "tilt_a": self.config.tilt_a,
+            "tilt_b": self.config.tilt_b,
+            "sensor_a": self.config.sensor_a,
+            "sensor_b": self.config.sensor_b,
+        }
+
+    def validate_pin_config(self) -> None:
+        used: dict[int, str] = {}
+        for name, pin in self.gpio_pins().items():
+            if not isinstance(pin, int) or not 0 <= pin <= 27:
+                raise ValueError(f"invalid BCM GPIO pin for {name}: {pin!r}")
+            if pin in used:
+                raise ValueError(f"BCM GPIO {pin} assigned to both {used[pin]} and {name}")
+            used[pin] = name
+        print(f"[hardware] pin config OK: {used}")
+
+    def verify_gpio_pins(self) -> None:
+        from gpiozero import InputDevice
+
+        for name, pin in self.gpio_pins().items():
+            device = InputDevice(pin, pull_up=True)
+            try:
+                device.value
+            finally:
+                device.close()
+            print(f"[hardware] BCM GPIO {pin} ({name}): OK")
+
+    def verify_devices(self) -> None:
+        checks = (
+            ("pan/tilt encoders", self.actuators.read),
+            ("platform encoder", self.sensor_encoder.read),
+            ("IMU", self.imu.read),
+            ("LiDAR", self.lidar.read),
+            ("camera", self.camera.read),
+        )
+        for name, read in checks:
+            try:
+                value = read()
+            except Exception as exc:
+                raise RuntimeError(f"hardware check failed for {name}: {exc}") from exc
+            print(f"[hardware] {name}: OK ({value})")
+
     def initialise_hardware(self) -> None:
         # PSEUDOCODE: lazy-import hardware adapters, then construct with configured pins/calibration.
         from backend.actuators.cycloidal_actuator import CycloidalActuator
-        from backend.actuators.imu_rpy import ImuOrientation
-        from backend.actuators.readings import ActuatorReadings
         from backend.actuators.turret import PanTiltTurret
-        from backend.sensors.camera_tracker import CameraTracker
-        from backend.sensors.encoder_readings import SensorEncoder
-        from backend.sensors.lidar_sensor import LidarSensor
 
-        self.actuators = ActuatorReadings(
-            pan_pin_a=self.config.pan_a,
-            pan_pin_b=self.config.pan_b,
-            tilt_pin_a=self.config.tilt_a,
-            tilt_pin_b=self.config.tilt_b,
-            pan_counts_per_rev=self.config.pan_counts_per_rev,
-            tilt_counts_per_rev=self.config.tilt_counts_per_rev,
-        )
-        self.sensor_encoder = SensorEncoder(
-            pin_a=self.config.sensor_a,
-            pin_b=self.config.sensor_b,
-            counts_per_rev=self.config.sensor_counts_per_rev,
-        )
-        self.imu = ImuOrientation()
-        self.lidar = LidarSensor()
-        self.camera = CameraTracker()
+        if self.config.simulate:
+            self.actuators = _SimActuatorReadings(
+                pan_encoder=_SimEncoder(self.config.pan_counts_per_rev),
+                tilt_encoder=_SimEncoder(self.config.tilt_counts_per_rev, math.asin(0.25)),
+            )
+            self.sensor_encoder = _SimSensorEncoder(_SimEncoder(self.config.sensor_counts_per_rev))
+            self.imu = _SimImu()
+            self.lidar = _SimLidar()
+            self.camera = _SimCamera()
+        else:
+            from backend.actuators.imu_rpy import ImuOrientation
+            from backend.actuators.readings import ActuatorReadings
+            from backend.sensors.camera_tracker import CameraTracker
+            from backend.sensors.encoder_readings import SensorEncoder
+            from backend.sensors.lidar_sensor import LidarSensor
+
+            self.actuators = ActuatorReadings(
+                pan_pin_a=self.config.pan_a,
+                pan_pin_b=self.config.pan_b,
+                tilt_pin_a=self.config.tilt_a,
+                tilt_pin_b=self.config.tilt_b,
+                pan_counts_per_rev=self.config.pan_counts_per_rev,
+                tilt_counts_per_rev=self.config.tilt_counts_per_rev,
+            )
+            self.sensor_encoder = SensorEncoder(
+                pin_a=self.config.sensor_a,
+                pin_b=self.config.sensor_b,
+                counts_per_rev=self.config.sensor_counts_per_rev,
+            )
+            self.imu = ImuOrientation()
+            self.lidar = LidarSensor()
+            self.camera = CameraTracker()
 
         # PSEUDOCODE: integrate 2-axis cycloidal turret; drivers can be injected later.
         pan_axis = CycloidalActuator("pan", encoder=getattr(self.actuators, "pan_encoder", None), min_angle_deg=-180, max_angle_deg=180)
@@ -355,11 +533,17 @@ class SurfaceMappingSystem:
 
     def run(self, max_cycles: int | None = None) -> None:
         # PSEUDOCODE: main acquisition loop with deterministic logging and safe shutdown.
+        if not self.config.simulate:
+            self.require_raspberry_pi()
+            self.validate_pin_config()
+            self.verify_gpio_pins()
         self.initialise_hardware()
-        self.logger.open()
         self._running = True
         cycles = 0
         try:
+            if not self.config.simulate:
+                self.verify_devices()
+            self.logger.open()
             while self._running:
                 measurement = self.process_measurement(self.collect_measurements())
                 if measurement is not None:
@@ -373,11 +557,24 @@ class SurfaceMappingSystem:
 
 
 def main() -> None:
-    system = SurfaceMappingSystem()
+    parser = argparse.ArgumentParser(description="Surface Level Mapping data acquisition.")
+    parser.add_argument("--simulate", action="store_true", help="use simulated sensors instead of Raspberry Pi hardware")
+    parser.add_argument("--cycles", type=int, default=None, help="stop after this many samples")
+    parser.add_argument("--output", type=Path, default=None, help="CSV output path")
+    parser.add_argument("--reflector-height", type=float, default=0.0, help="known reflector height H_ref in metres")
+    args = parser.parse_args()
+
+    config = MappingConfig(simulate=args.simulate, reflector_height_m=args.reflector_height)
+    if args.output is not None:
+        config.output_file = args.output
+    system = SurfaceMappingSystem(config)
     try:
-        system.run()
+        system.run(max_cycles=args.cycles)
     except KeyboardInterrupt:
         pass
+    except (RuntimeError, ValueError) as exc:
+        print(f"error: {exc}")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

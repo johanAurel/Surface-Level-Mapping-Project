@@ -69,6 +69,15 @@ cd "Surface Level Mapping Project"
 python3 -m backend.main
 ```
 
+Without `--simulate` (run this on the Pi): the program requires a Raspberry Pi, validates the configured BCM pins for duplicates/range, tests each GPIO pin, constructs the devices, reads every sensor once, then starts the logging loop. Any failed check aborts with an `error:` message.
+
+On a machine without Raspberry Pi hardware (e.g. WSL), use simulation mode:
+```bash
+python3 -m backend.data.main --simulate --cycles 10 --reflector-height 1.5
+```
+
+Useful flags: `--simulate`, `--cycles N`, `--output PATH`, `--reflector-height METRES`.
+
 Output CSV default: `backend/data/surface_measurements.csv`.
 
 ## Configuration / calibration notes
@@ -89,5 +98,5 @@ For accurate terrain coordinates, provide real platform localization and mountin
 
 ## Status / limitations
 - Core Python modules compile (`python3 -m py_compile` on backend `.py` files).
-- Hardware execution requires Raspberry Pi dependencies/devices (GPIO, serial, I2C, camera).
+- Hardware execution requires Raspberry Pi dependencies/devices (GPIO, serial, I2C, camera); use `--simulate` elsewhere.
 - I cannot inspect `/mnt/c/Users/user/Downloads/machine.png` in this environment (image input unsupported by current model), so comparison to that diagram must be done manually against the derived-variable list above.
