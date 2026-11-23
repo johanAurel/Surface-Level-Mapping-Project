@@ -6,9 +6,10 @@ The backend is the executable core of the project. It integrates sensors/actuato
 ## Entry points
 - `python3 -m backend.main` - recommended
 - `python3 -m backend.data.main` - direct orchestrator module
-- `python3 -m backend.data.main --simulate --cycles 10` - no-hardware simulation
+- `python3 -m backend.data.main --simulate` - no-hardware simulation (20 samples, progress printed)
 - Flags: `--simulate`, `--cycles N`, `--output PATH`, `--reflector-height METRES`
 - Real mode performs hardware preflight on the Pi: BCM pin validation, GPIO pin read test, device read test, then acquisition.
+- Simulation prints `t, x, y, d, theta_v, theta_h, yaw, h_ref, z` per sample and writes all fields to CSV; `h_ref` defaults to 1.5 m and odometry is simulated so `x/y` are populated.
 
 ## OOP architecture
 ```text

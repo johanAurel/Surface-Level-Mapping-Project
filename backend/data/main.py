@@ -34,6 +34,15 @@ from backend.data.coordinates import calculate_coordinates, calculate_robot_elev
 from backend.data.processing import combine_readings
 
 
+def _fmt(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 @dataclass
 class MappingConfig:
     pan_a: int = 17
@@ -236,7 +245,10 @@ class SurfaceMappingSystem:
         self.lidar: Any = None
         self.camera: Any = None
         self.turret: Any = None
-        self.position_estimator = PlatformPositionEstimator(self.config.wheel_circumference_m)
+        wheel_circumference = self.config.wheel_circumference_m
+        if self.config.simulate and wheel_circumference <= 0:
+            wheel_circumference = 1.0
+        self.position_estimator = PlatformPositionEstimator(wheel_circumference)
         self.logger = SurfaceMapDataLogger(self.config.output_file, self.output_fields())
         self._running = False
 
@@ -531,12 +543,31 @@ class SurfaceMappingSystem:
                     pass
         self.logger.close()
 
+    @staticmethod
+    def print_summary(index: int, measurement: dict[str, Any]) -> None:
+        print(
+            f"[simulate] {index:>3} "
+            f"t={measurement.get('timestamp')} "
+            f"x={_fmt(measurement.get('platform_x'))} "
+            f"y={_fmt(measurement.get('platform_y'))} "
+            f"d={_fmt(measurement.get('lidar_distance'))} "
+            f"theta_v={_fmt(measurement.get('theta_v_deg'))} "
+            f"theta_h={_fmt(measurement.get('theta_h_deg'))} "
+            f"yaw={_fmt(measurement.get('yaw'))} "
+            f"h_ref={_fmt(measurement.get('reflector_height_m'))} "
+            f"z={_fmt(measurement.get('z_robot_m'))}"
+        )
+
     def run(self, max_cycles: int | None = None) -> None:
         # PSEUDOCODE: main acquisition loop with deterministic logging and safe shutdown.
         if not self.config.simulate:
             self.require_raspberry_pi()
             self.validate_pin_config()
             self.verify_gpio_pins()
+        if max_cycles is not None and max_cycles <= 0:
+            max_cycles = None
+        elif self.config.simulate and max_cycles is None:
+            max_cycles = 20
         self.initialise_hardware()
         self._running = True
         cycles = 0
@@ -548,23 +579,31 @@ class SurfaceMappingSystem:
                 measurement = self.process_measurement(self.collect_measurements())
                 if measurement is not None:
                     self.logger.write(measurement)
+                    if self.config.simulate:
+                        self.print_summary(cycles + 1, measurement)
                 cycles += 1
                 if max_cycles is not None and cycles >= max_cycles:
                     break
                 time.sleep(self.config.sampling_interval_s)
         finally:
             self.close()
+        if self.config.simulate:
+            print(f"[simulate] finished: {cycles} samples -> {self.config.output_file} (all fields written to CSV)")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Surface Level Mapping data acquisition.")
     parser.add_argument("--simulate", action="store_true", help="use simulated sensors instead of Raspberry Pi hardware")
-    parser.add_argument("--cycles", type=int, default=None, help="stop after this many samples")
+    parser.add_argument("--cycles", type=int, default=None, help="stop after this many samples (simulation defaults to 20)")
     parser.add_argument("--output", type=Path, default=None, help="CSV output path")
-    parser.add_argument("--reflector-height", type=float, default=0.0, help="known reflector height H_ref in metres")
+    parser.add_argument("--reflector-height", type=float, default=None, help="known reflector height H_ref in metres (simulation defaults to 1.5)")
     args = parser.parse_args()
 
-    config = MappingConfig(simulate=args.simulate, reflector_height_m=args.reflector_height)
+    if args.reflector_height is None:
+        reflector_height = 1.5 if args.simulate else 0.0
+    else:
+        reflector_height = args.reflector_height
+    config = MappingConfig(simulate=args.simulate, reflector_height_m=reflector_height)
     if args.output is not None:
         config.output_file = args.output
     system = SurfaceMappingSystem(config)

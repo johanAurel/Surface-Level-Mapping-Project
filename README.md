@@ -73,8 +73,14 @@ Without `--simulate` (run this on the Pi): the program requires a Raspberry Pi, 
 
 On a machine without Raspberry Pi hardware (e.g. WSL), use simulation mode:
 ```bash
-python3 -m backend.data.main --simulate --cycles 10 --reflector-height 1.5
+python3 -m backend.data.main --simulate --reflector-height 1.5
 ```
+
+Simulation defaults to `h_ref = 1.5 m` (override with `--reflector-height`) and simulates odometry so `x/y` are populated. Each sample is printed with `t, x, y, d, theta_v, theta_h, yaw, h_ref, z`; the CSV contains all 47 fields:
+```text
+[simulate]   1 t=2026-11-23T15:35:32.601349+00:00 x=0.000 y=-0.000 d=2.482 theta_v=45.000 theta_h=0.000 yaw=-3.203 h_ref=1.500 z=-0.255
+```
+Simulation runs 20 samples and prints progress by default; pass `--cycles N` to change it (use `--cycles 0` for a continuous stream, stopped with Ctrl+C). Real hardware mode runs continuously unless `--cycles N` is given.
 
 Useful flags: `--simulate`, `--cycles N`, `--output PATH`, `--reflector-height METRES`.
 
