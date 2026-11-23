@@ -1,16 +1,18 @@
 """
-HSV Color Filter
-================
-Description: HSV color space filtering for object isolation. Creates mask based on HSV thresholds, 
-displays original, mask, and filtered object views. Shows pixel HSV values at center.
+HSV Color Filter (Demo)
 
-Hardware Requirements:
-- Raspberry Pi Camera Module
-
-Features: HSV conversion, color masking, multi-window display, pixel inspection
-
-Author: Vilas
+PSEUDOCODE:
+    INITIALIZE camera
+    DEFINE HSV lower/upper bounds
+    LOOP:
+        CAPTURE frame
+        CONVERT BGR->HSV
+        CREATE mask = inRange(HSV, lower, upper)
+        object = bitwise_and(frame, frame, mask)
+        DISPLAY frame/mask/object
+        BREAK on 'q'
 """
+
 
 from picamera2 import Picamera2
 from time import time

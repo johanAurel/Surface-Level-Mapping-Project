@@ -1,16 +1,17 @@
 """
-Basic Picamera Setup
-====================
-Description: Basic Picamera2 configuration with shape overlays. Displays live camera feed with 
-rectangle and circle overlays, demonstrating fundamental OpenCV drawing functions and FPS calculation.
+Basic Picamera Setup (Demo)
 
-Hardware Requirements:
-- Raspberry Pi Camera Module
-
-Features: Camera setup, shape overlays, FPS display, pixel value inspection
-
-Author: Vilas
+PSEUDOCODE:
+    INITIALIZE Picamera2 preview config
+    START camera
+    LOOP:
+        CAPTURE frame
+        DRAW overlays/text
+        SHOW frame
+        BREAK on 'q'
+    RELEASE windows
 """
+
 
 import cv2
 from picamera2 import Picamera2

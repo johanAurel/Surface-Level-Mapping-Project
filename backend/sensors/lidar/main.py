@@ -1,3 +1,16 @@
+"""
+TFmini basic serial read demo.
+
+PSEUDOCODE:
+    OPEN serial port at TFmini baudrate
+    LOOP:
+        WAIT for >=9 bytes
+        READ 9-byte frame
+        IF header == 0x59 0x59:
+            distance_cm = low + high*256
+            PRINT distance
+    ON CTRL+C: close serial
+"""
 # -*- coding: utf-8 -*
 import serial
 

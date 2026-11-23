@@ -1,16 +1,18 @@
 """
-Color Detection with Trackbars
-===============================
-Description: Interactive HSV color detection with trackbar controls. Adjust Hue, Saturation, and 
-Value ranges in real-time to tune color filtering. Shows masked objects and contour detection.
+Color Detection with Trackbars (Demo)
 
-Hardware Requirements:
-- Raspberry Pi Camera Module
-
-Features: Interactive trackbars, HSV tuning, contour detection, bounding boxes
-
-Author: Vilas
+PSEUDOCODE:
+    CREATE trackbars for LH/LS/LV/HH/HS/HV
+    INITIALIZE camera
+    LOOP:
+        READ trackbar bounds
+        CAPTURE frame and convert to HSV
+        MASK by bounds
+        FIND contours and draw largest bbox
+        DISPLAY outputs
+        BREAK on 'q'
 """
+
 
 from picamera2 import Picamera2
 from time import time

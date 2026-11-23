@@ -1,18 +1,19 @@
 """
-Pan-Tilt Tracking System
-=========================
-Description: Automated pan-tilt camera tracking using HSV color detection and servo motors. Camera 
-follows colored objects by adjusting servo angles based on object position in frame.
+Pan-Tilt Tracking System (Demo)
 
-Hardware Requirements:
-- Raspberry Pi Camera Module
-- Pan servo on GPIO 13
-- Tilt servo on GPIO 12
-
-Features: HSV tracking, servo control, automated camera movement, trackbar tuning
-
-Author: Vilas
+PSEUDOCODE:
+    INITIALIZE camera + pan/tilt servos
+    CREATE HSV trackbars
+    LOOP:
+        CAPTURE frame and threshold by HSV
+        FIND largest contour/bounding box
+        COMPUTE x/y pixel error from frame center
+        IF error exceeds deadband:
+            ADJUST pan/tilt servo angles
+        DISPLAY debug windows
+        BREAK on 'q'
 """
+
 
 from picamera2 import Picamera2
 from time import time
