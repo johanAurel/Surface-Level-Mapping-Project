@@ -30,8 +30,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from backend.data.coordinates import calculate_coordinates, calculate_robot_elevation
+from backend.data.manual_scan import ManualScanController
 from backend.data.processing import combine_readings
+from backend.data.scan_area import CalibrationConfig, ScanAreaConfig
+from backend.data.terrain_plots import TerrainPlotter
 
 
 def _fmt(value: Any) -> str:
@@ -66,6 +71,12 @@ class MappingConfig:
     tilt_gain_deg_per_px: float = 0.01
     tilt_mount_offset_deg: float = 0.0
     simulate: bool = False
+    manual_scan: bool = False
+    area: ScanAreaConfig = field(default_factory=ScanAreaConfig)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
+    scan_plots_dir: Path | None = Path("backend/data/scan_plots")
+    calibration_prompts: bool = True
+    accept_prompts: bool = True
 
 
 @dataclass
@@ -178,14 +189,24 @@ class _SimCamera:
 
 @dataclass
 class PlatformPositionEstimator:
-    """Simple odometry placeholder.
-
-    Without heading/wheel calibration it cannot produce absolute X/Y; it exposes
-    travel distance and placeholders so the dataset schema remains terrain-ready.
-    """
+    """Calibrated odometry placeholder using wheel travel and IMU yaw."""
 
     wheel_circumference_m: float = 0.0
+    start_x_m: float = 0.0
+    start_y_m: float = 0.0
+    start_yaw_deg: float = 0.0
     _start_degrees: float | None = None
+
+    def apply_pose(self, calibration: CalibrationConfig) -> None:
+        self.start_x_m = calibration.start_x_m
+        self.start_y_m = calibration.start_y_m
+        self.start_yaw_deg = calibration.start_yaw_deg
+
+    def apply_calibration(self, calibration: CalibrationConfig) -> None:
+        calibration.validate(require_reflector=False)
+        self.apply_pose(calibration)
+        self.wheel_circumference_m = calibration.wheel_circumference_m
+        self._start_degrees = None
 
     def read(self, sensor_encoder_degrees: float | None, imu: dict[str, Any]) -> dict[str, Any]:
         degrees = 0.0 if sensor_encoder_degrees is None else float(sensor_encoder_degrees)
@@ -196,9 +217,17 @@ class PlatformPositionEstimator:
         travel_m = revolutions * self.wheel_circumference_m if self.wheel_circumference_m > 0 else None
 
         yaw = imu.get("yaw")
-        yaw_rad = math.radians(float(yaw)) if yaw is not None else None
-        platform_x = travel_m * math.cos(yaw_rad) if travel_m is not None and yaw_rad is not None else None
-        platform_y = travel_m * math.sin(yaw_rad) if travel_m is not None and yaw_rad is not None else None
+        yaw_rad = math.radians(float(yaw) - self.start_yaw_deg) if yaw is not None else None
+        platform_x = (
+            self.start_x_m + travel_m * math.cos(yaw_rad)
+            if travel_m is not None and yaw_rad is not None
+            else None
+        )
+        platform_y = (
+            self.start_y_m + travel_m * math.sin(yaw_rad)
+            if travel_m is not None and yaw_rad is not None
+            else None
+        )
 
         return {
             "platform_x": platform_x,
@@ -246,6 +275,9 @@ class SurfaceMappingSystem:
         self.lidar: Any = None
         self.camera: Any = None
         self.turret: Any = None
+        self.calibration = self.config.calibration
+        self.manual_scan: ManualScanController | None = None
+        self.plotter: TerrainPlotter | None = None
         wheel_circumference = self.config.wheel_circumference_m
         if self.config.simulate and wheel_circumference <= 0:
             wheel_circumference = 1.0
@@ -306,6 +338,22 @@ class SurfaceMappingSystem:
             "point_x",
             "point_y",
             "point_z",
+            "block_row",
+            "block_col",
+            "block_scan_index",
+            "accepted_for_scan",
+            "calibration_version",
+            "field_x_m",
+            "field_y_m",
+            "block_size_m",
+            "scan_session",
+            "pose_source",
+            "reflector_x_m",
+            "reflector_y_m",
+            "start_x_m",
+            "start_y_m",
+            "start_yaw_deg",
+            "wheel_circumference_m",
         ]
 
     @staticmethod
@@ -573,37 +621,174 @@ class SurfaceMappingSystem:
             f"z={_fmt(measurement.get('z_robot_m'))}"
         )
 
-    def run(self, max_cycles: int | None = None) -> None:
-        # PSEUDOCODE: main acquisition loop with deterministic logging and safe shutdown.
+    def apply_calibration(
+        self, calibration: CalibrationConfig, require_reflector: bool = True
+    ) -> None:
+        calibration.validate(require_reflector=require_reflector)
+        self.calibration = calibration
+        self.config.reflector_height_m = calibration.reflector_z_m
+        self.config.tilt_mount_offset_deg = calibration.tilt_mount_offset_deg
+        self.position_estimator.apply_calibration(calibration)
+
+    def _prepare_run(self, max_cycles: int | None) -> int | None:
         if not self.config.simulate:
             self.require_raspberry_pi()
             self.validate_pin_config()
             self.verify_gpio_pins()
         if max_cycles is not None and max_cycles <= 0:
             max_cycles = None
-        elif self.config.simulate and max_cycles is None:
+        elif self.config.simulate and not self.config.manual_scan and max_cycles is None:
             max_cycles = 20
         self.initialise_hardware()
         self._running = True
+        if self.calibration.wheel_circumference_m > 0:
+            self.apply_calibration(self.calibration, require_reflector=False)
+        else:
+            self.position_estimator.apply_pose(self.calibration)
+        if self.config.manual_scan:
+            self.manual_scan = ManualScanController(
+                area=self.config.area,
+                calibration=self.calibration,
+                calibration_prompts=self.config.calibration_prompts,
+                accept_prompts=self.config.accept_prompts,
+            )
+            self.plotter = TerrainPlotter(
+                self.config.area,
+                save_dir=self.config.scan_plots_dir,
+                show=False,
+                pause_s=0.0,
+            )
+        self.logger.open()
+        return max_cycles
+
+    def _plot_current_block(self) -> None:
+        if self.manual_scan is None or self.plotter is None:
+            return
+        points = self.manual_scan.current_block_points
+        if not points:
+            return
+        target = self.manual_scan.current_target()
+        x = np.asarray([point["x"] for point in points], dtype=float)
+        y = np.asarray([point["y"] for point in points], dtype=float)
+        z = np.asarray([point["z_mm"] for point in points], dtype=float)
+        block_number = target["row"] * self.manual_scan.area.columns + target["col"] + 1
+        output_path = self.plotter.plot(
+            x,
+            y,
+            z,
+            row=target["row"],
+            col=target["col"],
+            scan_index=block_number,
+            total_scans=self.manual_scan.area.rows * self.manual_scan.area.columns,
+            title="Block",
+            filename=(
+                f"block_{block_number:03d}_r{target['row']:02d}_c{target['col']:02d}"
+                f"_v{self.calibration.version:02d}.png"
+            ),
+            reflector_xy=(self.calibration.reflector_x_m, self.calibration.reflector_y_m),
+        )
+        destination = f" -> {output_path}" if output_path is not None else ""
+        print(f"[scan] block ({target['row']}, {target['col']}) plotted{destination}")
+
+    def _run_continuous(self, max_cycles: int | None) -> None:
         cycles = 0
+        while self._running:
+            measurement = self.process_measurement(self.collect_measurements())
+            if measurement is not None:
+                self.logger.write(measurement)
+                if self.config.simulate:
+                    self.print_summary(cycles + 1, measurement)
+            cycles += 1
+            if max_cycles is not None and cycles >= max_cycles:
+                break
+            time.sleep(self.config.sampling_interval_s)
+        if self.config.simulate:
+            print(f"[simulate] finished: {cycles} samples -> {self.config.output_file} (all fields written to CSV)")
+
+    def _run_manual_scan(self, max_cycles: int | None) -> None:
+        if self.manual_scan is None:
+            return
+        controller = self.manual_scan
+        cycles = 0
+        applied_version = self.calibration.version
+        calibration_applied = (
+            self.calibration.wheel_circumference_m > 0
+            and self.calibration.reflector_z_m > 0
+        )
+        while self._running and not controller.completed:
+            controller.prompt_before_block()
+            self.config.area = controller.area
+            if self.plotter is not None:
+                self.plotter.area = controller.area
+            if not calibration_applied or controller.calibration.version != applied_version:
+                self.apply_calibration(controller.calibration)
+                calibration_applied = True
+                applied_version = controller.calibration.version
+            target = controller.current_target()
+            print(
+                f"[scan] block ({target['row']}, {target['col']}) "
+                f"needs {target['count']} reference-tracked scans"
+            )
+            while self._running and not controller.block_complete():
+                action = controller.prompt_action()
+                if action == "q":
+                    self._running = False
+                    break
+                if action == "s":
+                    controller.skip_block()
+                    print(f"[scan] block ({target['row']}, {target['col']}) skipped")
+                    break
+
+                target = controller.current_target()
+                raw = self.collect_measurements()
+                measurement = self.process_measurement(raw)
+                cycles += 1
+                if measurement is None:
+                    raw.update(
+                        controller.metadata(self.calibration, target["scan_index"], False)
+                    )
+                    self.logger.write(raw)
+                    print(f"[scan] sample {target['scan_index']} rejected by processing")
+                else:
+                    accepted = controller.accept(measurement)
+                    measurement.update(
+                        controller.metadata(self.calibration, target["scan_index"], accepted)
+                    )
+                    self.logger.write(measurement)
+                    if accepted:
+                        if self.config.simulate:
+                            self.print_summary(cycles, measurement)
+                    else:
+                        reason = controller.can_accept(measurement)
+                        print(f"[scan] sample {target['scan_index']} not accepted: {reason}")
+
+                if max_cycles is not None and cycles >= max_cycles:
+                    self._running = False
+                    break
+                time.sleep(self.config.sampling_interval_s)
+
+            if not self._running:
+                break
+            self._plot_current_block()
+            if not controller.advance_block():
+                break
+        if self.config.simulate:
+            print(
+                f"[simulate] manual scan finished: {len(controller.all_points)} accepted points "
+                f"-> {self.config.output_file}"
+            )
+
+    def run(self, max_cycles: int | None = None) -> None:
+        max_cycles = self._prepare_run(max_cycles)
         try:
             if not self.config.simulate:
                 self.verify_devices()
-            self.logger.open()
-            while self._running:
-                measurement = self.process_measurement(self.collect_measurements())
-                if measurement is not None:
-                    self.logger.write(measurement)
-                    if self.config.simulate:
-                        self.print_summary(cycles + 1, measurement)
-                cycles += 1
-                if max_cycles is not None and cycles >= max_cycles:
-                    break
-                time.sleep(self.config.sampling_interval_s)
+            if self.config.manual_scan:
+                self._run_manual_scan(max_cycles)
+            else:
+                self._run_continuous(max_cycles)
         finally:
             self.close()
-        if self.config.simulate:
-            print(f"[simulate] finished: {cycles} samples -> {self.config.output_file} (all fields written to CSV)")
 
 
 def main() -> None:
@@ -612,17 +797,65 @@ def main() -> None:
     parser.add_argument("--cycles", type=int, default=None, help="stop after this many samples (simulation defaults to 20)")
     parser.add_argument("--output", type=Path, default=None, help="CSV output path")
     parser.add_argument("--reflector-height", type=float, default=None, help="known reflector height H_ref in metres (simulation defaults to 1.5)")
+    parser.add_argument("--manual-scan", action="store_true", help="run manual reference-tracked block scanning")
+    parser.add_argument("--x-length", type=float, default=120.0, help="field X length in metres")
+    parser.add_argument("--y-length", type=float, default=56.0, help="field Y length in metres")
+    parser.add_argument("--block-size", type=float, default=8.0, help="block side length in metres")
+    parser.add_argument("--points-per-block", type=int, default=4, help="scans per block")
+    parser.add_argument("--points-grid", type=str, default=None, help="semicolon-separated per-block scan counts")
+    parser.add_argument("--scan-plots-dir", type=Path, default=Path("backend/data/scan_plots"))
+    parser.add_argument("--no-prompts", action="store_true", help="disable calibration and accept prompts")
+    parser.add_argument("--reflector-x", type=float, default=0.0, help="reflector X in field coordinates")
+    parser.add_argument("--reflector-y", type=float, default=0.0, help="reflector Y in field coordinates")
+    parser.add_argument("--start-x", type=float, default=0.0, help="initial machine X in field coordinates")
+    parser.add_argument("--start-y", type=float, default=0.0, help="initial machine Y in field coordinates")
+    parser.add_argument("--start-yaw", type=float, default=0.0, help="initial machine yaw in degrees")
+    parser.add_argument("--wheel-circumference", type=float, default=None, help="calibrated wheel circumference in metres (simulation defaults to 1.0)")
+    parser.add_argument("--tilt-mount-offset", type=float, default=0.0, help="fixed LiDAR/tilt mount offset in degrees")
     args = parser.parse_args()
 
-    if args.reflector_height is None:
-        reflector_height = 1.5 if args.simulate else 0.0
-    else:
-        reflector_height = args.reflector_height
-    config = MappingConfig(simulate=args.simulate, reflector_height_m=reflector_height)
-    if args.output is not None:
-        config.output_file = args.output
-    system = SurfaceMappingSystem(config)
     try:
+        reflector_height = 1.5 if args.reflector_height is None and args.simulate else args.reflector_height or 0.0
+        wheel_circumference = 1.0 if args.wheel_circumference is None and args.simulate else args.wheel_circumference or 0.0
+        points_per_block: int | np.ndarray = args.points_per_block
+        if args.points_grid is not None:
+            rows = []
+            for line in args.points_grid.split(";"):
+                rows.append([int(value) for value in line.split()])
+            points_per_block = np.asarray(rows, dtype=int)
+
+        area = ScanAreaConfig(
+            x_length_m=args.x_length,
+            y_length_m=args.y_length,
+            block_size_m=args.block_size,
+            points_per_block=points_per_block,
+        )
+        calibration = CalibrationConfig(
+            reflector_x_m=args.reflector_x,
+            reflector_y_m=args.reflector_y,
+            reflector_z_m=reflector_height,
+            start_x_m=args.start_x,
+            start_y_m=args.start_y,
+            start_yaw_deg=args.start_yaw,
+            wheel_circumference_m=wheel_circumference,
+            tilt_mount_offset_deg=args.tilt_mount_offset,
+            version=1,
+        )
+        config = MappingConfig(
+            simulate=args.simulate,
+            reflector_height_m=reflector_height,
+            wheel_circumference_m=wheel_circumference,
+            tilt_mount_offset_deg=args.tilt_mount_offset,
+            manual_scan=args.manual_scan,
+            area=area,
+            calibration=calibration,
+            scan_plots_dir=args.scan_plots_dir,
+            calibration_prompts=not args.no_prompts,
+            accept_prompts=not args.no_prompts,
+        )
+        if args.output is not None:
+            config.output_file = args.output
+        system = SurfaceMappingSystem(config)
         system.run(max_cycles=args.cycles)
     except KeyboardInterrupt:
         pass

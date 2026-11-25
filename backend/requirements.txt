@@ -4,4 +4,5 @@ adafruit-circuitpython-bno055
 adafruit-blinka
 opencv-python
 numpy
+matplotlib
 picamera2; platform_system == "Linux"
