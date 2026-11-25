@@ -1,5 +1,9 @@
 __pycache__/
 *.py[cod]
 backend/data/surface_measurements.csv
+backend/data/sessions/*.json
+backend/data/sessions/.*.lock
+backend/data/scan_plots/
+backend/data/terrain_scans/
 .venv/
 .env

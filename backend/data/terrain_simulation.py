@@ -89,6 +89,9 @@ class TerrainScanSimulator:
             show=self.config.show,
             pause_s=self.config.pause_s,
             grid_step_m=self.config.grid_step_m,
+            height_limit_mm=1.0,
+            z_axis_limit_mm=2.0,
+            box_z_aspect=25.0,
         )
 
     def _noise_seed(self, offset: int, row: int, col: int, point: int) -> int | None:

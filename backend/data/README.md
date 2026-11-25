@@ -11,6 +11,7 @@ Contains the integration/orchestration and data transforms that turn raw sensor 
 - `manual_scan.py` - manual reference-tracked block progression and scan acceptance.
 - `terrain_plots.py` - shared measured-height/coverage plotting for simulated and real scans.
 - `terrain_simulation.py` - configurable field/square scan simulation; plots measured terrain after each completed square and saves one PNG per scan.
+- `session_store.py` - persisted scan sessions with blocks, points, partial progress, and frontend-compatible JSON.
 
 ## OOP/pseudocode
 ```text
@@ -40,7 +41,7 @@ SurfaceMappingSystem.run():
 - Validity depends on LiDAR validity; reflector mode also requires configured `reflector_height_m`.
 
 ## Note
-The acquisition path generates no continuous terrain mesh/DEM; its output is structured measurement data for downstream mapping. Manual block mode plots accepted scan points after each completed block, and `terrain_simulation.py` generates incremental terrain plots from a simulated true surface plus measured scan points.
+The acquisition path generates no continuous terrain mesh/DEM; its output is structured measurement data for downstream mapping. `python3 -m backend.data.main --simulate --show` writes a simulated grid (default 70 m x 100 m, 5 m spacing, seed 14, noise off) to CSV, then reads `point_x/point_y`, `measured_height_mm` and `error_mm` back to plot three panels and saves the chart as `backend/data/scan_plots/csv_plot_TIMESTAMP.png`. Manual block mode plots accepted scan points after each completed block and can persist them to `backend/data/sessions/` with `--session-id` for the frontend. `terrain_simulation.py` generates incremental terrain plots from a simulated true surface plus measured scan points.
 
 ## Manual block scanning
 ```bash

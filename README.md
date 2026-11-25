@@ -86,9 +86,17 @@ Simulation defaults to `h_ref = 1.5 m` (override with `--reflector-height`) and 
 ```
 Simulation runs 20 samples and prints progress by default; pass `--cycles N` to change it (use `--cycles 0` for a continuous stream, stopped with Ctrl+C). Real hardware mode runs continuously unless `--cycles N` is given.
 
-Useful flags: `--simulate`, `--cycles N`, `--output PATH`, `--reflector-height METRES`.
+Useful flags: `--simulate`, `--cycles N`, `--output PATH`, `--reflector-height METRES`, `--show` to simulate a grid, plot the written CSV and save a PNG.
 
 Output CSV default for `backend/data/main.py`: `backend/data/surface_measurements.csv`.
+
+To simulate values into CSV, then plot that CSV and store the chart without the frontend:
+
+```bash
+python3 -m backend.data.main --simulate --show
+```
+
+In this mode the simulator writes a full grid to CSV (default 70 m x 100 m field, 5 m spacing, seed 14, noise off), then reads the CSV back to plot measured height in 3D/2D and measurement error as three panels. The PNG is saved under `backend/data/scan_plots/` as `csv_plot_TIMESTAMP.png` and displayed. Use `--grid-step METRES`, `--sensor-height METRES`, `--noise-on`, `--noise-scale`, `--seed`, `--output PATH` and `--scan-plots-dir PATH` to change the simulation and outputs; `--cycles` applies only to continuous sample simulation without `--show`.
 
 ## Manual block scanning
 `backend/data/main.py --manual-scan` runs reference-tracked scans block by block. Set field size and block size before starting; a 100 x 100 m field with 5 m blocks becomes a 20 x 20 block grid. Each block asks for a configured number of accepted scans, then saves a plot to `backend/data/scan_plots/` before moving to the next block.
@@ -98,6 +106,30 @@ python3 -m backend.data.main --simulate --manual-scan --x-length 10 --y-length 1
 ```
 
 Hardware mode still requires a Raspberry Pi. In normal manual mode, prompts let you change scan area and calibration before each block, then `Enter` measures, `s` skips the block, and `q` quits. `--no-prompts` auto-accepts samples for simulation/testing. Use `--points-grid` for per-block counts and `--scan-plots-dir PATH` to change plot output.
+
+Pass `--session-id ID` to stream accepted points into a frontend scan session. The ID is shown in the frontend header; select the same session there to watch the field fill live.
+
+## Frontend scan console
+A dependency-free console lives in `frontend/`. Start its local API server and open the printed URL:
+
+```bash
+python3 -m backend.web.server
+```
+
+Then open `http://127.0.0.1:8765`. The console lets you:
+- record and edit field scale, block size, scan counts, reflector height, wheel circumference, and initial pose;
+- watch the field fill block by block, with live point dots and depth heat colors;
+- click, shift-click, ctrl-click, or drag to select one block or a block group;
+- mark selected blocks for rescan (consumed by the next backend run), clear their points, add demo scans for testing, and edit or delete individual variables;
+- view depth-by-block and selected-block depth charts;
+- save drafts, resume unfinished sessions, or start a completely new scan.
+
+Sessions are persisted as JSON under `backend/data/sessions/`. Use `Add demo scans` to verify the UI without hardware. For live hardware/simulator integration from Python:
+
+```bash
+python3 -m backend.web.server
+python3 -m backend.data.main --simulate --manual-scan --session-id <id-from-frontend> --x-length 10 --y-length 10 --block-size 5 --points-per-block 2 --no-prompts
+```
 
 ## Terrain scan simulation
 `backend/data/terrain_simulation.py` uses the reflector geometry to simulate scan points and plots the terrain after every full scan, where one full scan means one square of the field is completed.
@@ -125,6 +157,9 @@ Edit `MappingConfig` in `backend/data/main.py`, or pass the matching CLI flags:
 - `backend/sensors/` - LiDAR/camera/encoder interfaces
 - `backend/actuators/` - IMU and actuator interfaces
 - `backend/encoders/` - quadrature encoder abstraction
+- `backend/web/` - local HTTP/SSE API for the frontend
+- `backend/data/sessions/` - persisted scan sessions
+- `frontend/` - dependency-free scan console UI
 
 ## Status / limitations
 - Core Python modules compile (`python3 -m py_compile` on backend `.py` files).

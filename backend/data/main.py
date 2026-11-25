@@ -16,7 +16,7 @@ PSEUDOCODE (system):
         WRITE measurement+point to CSV
     ON EXIT: close all devices/files
 
-This derives terrain-ready variables; it does not render terrain.
+This derives terrain-ready variables, plots each completed manual block, and can persist accepted points into a scan session for the frontend.
 """
 
 from __future__ import annotations
@@ -36,7 +36,9 @@ from backend.data.coordinates import calculate_coordinates, calculate_robot_elev
 from backend.data.manual_scan import ManualScanController
 from backend.data.processing import combine_readings
 from backend.data.scan_area import CalibrationConfig, ScanAreaConfig
+from backend.data import session_store
 from backend.data.terrain_plots import TerrainPlotter
+from backend.data.terrain_simulation import ScanConfig as SimGridConfig, TerrainScanSimulator
 
 
 def _fmt(value: Any) -> str:
@@ -75,8 +77,15 @@ class MappingConfig:
     area: ScanAreaConfig = field(default_factory=ScanAreaConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     scan_plots_dir: Path | None = Path("backend/data/scan_plots")
+    show_plots: bool = False
+    sim_grid_step_m: float = 5.0
+    sim_sensor_height_m: float = 1.2
+    sim_noise_on: bool = False
+    sim_noise_scale: float = 1.0
+    sim_seed: int | None = 14
     calibration_prompts: bool = True
     accept_prompts: bool = True
+    session_id: str | None = None
 
 
 @dataclass
@@ -338,6 +347,9 @@ class SurfaceMappingSystem:
             "point_x",
             "point_y",
             "point_z",
+            "terrain_height_mm",
+            "measured_height_mm",
+            "error_mm",
             "block_row",
             "block_col",
             "block_scan_index",
@@ -346,6 +358,7 @@ class SurfaceMappingSystem:
             "field_x_m",
             "field_y_m",
             "block_size_m",
+            "grid_step_m",
             "scan_session",
             "pose_source",
             "reflector_x_m",
@@ -630,6 +643,36 @@ class SurfaceMappingSystem:
         self.config.tilt_mount_offset_deg = calibration.tilt_mount_offset_deg
         self.position_estimator.apply_calibration(calibration)
 
+    def session_config(self) -> dict[str, Any]:
+        area = self.config.area
+        calibration = self.calibration
+        counts = area.points_per_block
+        return {
+            "x_length_m": area.x_length_m,
+            "y_length_m": area.y_length_m,
+            "block_size_m": area.block_size_m,
+            "points_per_block": counts.tolist() if isinstance(counts, np.ndarray) else int(counts),
+            "reflector_height_m": calibration.reflector_z_m,
+            "wheel_circumference_m": calibration.wheel_circumference_m,
+            "start_x_m": calibration.start_x_m,
+            "start_y_m": calibration.start_y_m,
+            "start_yaw_deg": calibration.start_yaw_deg,
+            "tilt_mount_offset_deg": calibration.tilt_mount_offset_deg,
+        }
+
+    def _ensure_session(self) -> None:
+        if not self.config.manual_scan or not self.config.session_id:
+            return
+        config = self.session_config()
+        try:
+            session_store.load_session(self.config.session_id)
+        except FileNotFoundError:
+            session_store.create_session(
+                config, name=f"Field scan {self.config.session_id}", session_id=self.config.session_id
+            )
+        else:
+            session_store.reconfigure_session(self.config.session_id, config)
+
     def _prepare_run(self, max_cycles: int | None) -> int | None:
         if not self.config.simulate:
             self.require_raspberry_pi()
@@ -646,6 +689,9 @@ class SurfaceMappingSystem:
         else:
             self.position_estimator.apply_pose(self.calibration)
         if self.config.manual_scan:
+            self._ensure_session()
+            if self.config.session_id:
+                session_store.consume_rescan_requests(self.config.session_id)
             self.manual_scan = ManualScanController(
                 area=self.config.area,
                 calibration=self.calibration,
@@ -657,6 +703,9 @@ class SurfaceMappingSystem:
                 save_dir=self.config.scan_plots_dir,
                 show=False,
                 pause_s=0.0,
+                height_limit_mm=1.0,
+                z_axis_limit_mm=2.0,
+                box_z_aspect=25.0,
             )
         self.logger.open()
         return max_cycles
@@ -690,6 +739,213 @@ class SurfaceMappingSystem:
         destination = f" -> {output_path}" if output_path is not None else ""
         print(f"[scan] block ({target['row']}, {target['col']}) plotted{destination}")
 
+    def _run_simulated_grid(self) -> None:
+        cfg = self.config
+        area = cfg.area
+        base_x = cfg.calibration.reflector_x_m if cfg.calibration.reflector_x_m > 0 else None
+        sim_config = SimGridConfig(
+            x_length_m=area.x_length_m,
+            y_length_m=area.y_length_m,
+            block_size_m=area.block_size_m,
+            points_per_block=1,
+            seed=cfg.sim_seed,
+            noise_on=cfg.sim_noise_on,
+            noise_scale=cfg.sim_noise_scale,
+            target_height_m=cfg.reflector_height_m,
+            sensor_height_m=cfg.sim_sensor_height_m,
+            base_x_m=base_x,
+            base_y_m=cfg.calibration.reflector_y_m,
+            grid_step_m=cfg.sim_grid_step_m,
+            save_dir=None,
+            show=False,
+            pause_s=0.0,
+        )
+        simulator = TerrainScanSimulator(sim_config)
+        xs = np.arange(0.0, area.x_length_m + 1e-9, cfg.sim_grid_step_m)
+        ys = np.arange(0.0, area.y_length_m + 1e-9, cfg.sim_grid_step_m)
+        x_mesh, y_mesh = np.meshgrid(xs, ys)
+        terrain_mm = simulator.terrain.height_mm(x_mesh, y_mesh)
+        measured_mm, error_mm = simulator.measure(x_mesh, y_mesh, noise_seed=cfg.sim_seed)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        for row_index, y_value in enumerate(ys):
+            for col_index, x_value in enumerate(xs):
+                point_x = float(x_value)
+                point_y = float(y_value)
+                measured = float(measured_mm[row_index, col_index])
+                self.logger.write(
+                    {
+                        "timestamp": timestamp,
+                        "reflector_height_m": cfg.reflector_height_m,
+                        "theta_v_deg": None,
+                        "theta_h_deg": None,
+                        "platform_x": point_x,
+                        "platform_y": point_y,
+                        "platform_z": 0.0,
+                        "pose_source": "simulated_grid",
+                        "z_robot_m": measured / 1000.0,
+                        "point_x": point_x,
+                        "point_y": point_y,
+                        "point_z": measured / 1000.0,
+                        "terrain_height_mm": float(terrain_mm[row_index, col_index]),
+                        "measured_height_mm": measured,
+                        "error_mm": float(error_mm[row_index, col_index]),
+                        "block_row": min(
+                            area.rows - 1, int(math.floor(point_y / area.block_size_m))
+                        ),
+                        "block_col": min(
+                            area.columns - 1, int(math.floor(point_x / area.block_size_m))
+                        ),
+                        "block_scan_index": row_index * len(xs) + col_index + 1,
+                        "accepted_for_scan": True,
+                        "calibration_version": self.calibration.version,
+                        "field_x_m": area.x_length_m,
+                        "field_y_m": area.y_length_m,
+                        "block_size_m": area.block_size_m,
+                        "grid_step_m": cfg.sim_grid_step_m,
+                        "scan_session": cfg.session_id or "",
+                        "reflector_x_m": sim_config.base_x,
+                        "reflector_y_m": sim_config.base_y_m,
+                        "start_x_m": self.calibration.start_x_m,
+                        "start_y_m": self.calibration.start_y_m,
+                        "start_yaw_deg": self.calibration.start_yaw_deg,
+                        "wheel_circumference_m": cfg.wheel_circumference_m,
+                    }
+                )
+        max_error = float(np.max(np.abs(error_mm)))
+        print(
+            f"[simulate] grid={len(xs)}x{len(ys)} points={measured_mm.size} "
+            f"max|error|={max_error:.4f} mm -> {cfg.output_file}"
+        )
+
+    @staticmethod
+    def _csv_number(row: dict[str, str], key: str) -> float | None:
+        value = row.get(key)
+        if value is None or not str(value).strip():
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    def _plot_csv_results(self) -> None:
+        try:
+            with self.config.output_file.open("r", newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        except (OSError, csv.Error) as exc:
+            print(f"[plot] could not read CSV {self.config.output_file}: {exc}")
+            return
+
+        area = self.config.area
+        save_dir = self.config.scan_plots_dir or Path("backend/data/scan_plots")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+        grid_rows: list[tuple[float, float, float, float, float]] = []
+        for row in rows:
+            x = self._csv_number(row, "point_x")
+            y = self._csv_number(row, "point_y")
+            measured = self._csv_number(row, "measured_height_mm")
+            terrain = self._csv_number(row, "terrain_height_mm")
+            error = self._csv_number(row, "error_mm")
+            if None not in (x, y, measured, terrain, error):
+                grid_rows.append((x, y, measured, terrain, error))
+
+        x_values = sorted({round(point[0], 9) for point in grid_rows})
+        y_values = sorted({round(point[1], 9) for point in grid_rows})
+        if len(grid_rows) == len(x_values) * len(y_values) and len(x_values) > 1 and len(y_values) > 1:
+            x_index = {value: index for index, value in enumerate(x_values)}
+            y_index = {value: index for index, value in enumerate(y_values)}
+            measured_grid = np.full((len(y_values), len(x_values)), np.nan, dtype=float)
+            terrain_grid = np.full_like(measured_grid, np.nan)
+            error_grid = np.full_like(measured_grid, np.nan)
+            for x, y, measured, terrain, error in grid_rows:
+                row_index = y_index[round(y, 9)]
+                col_index = x_index[round(x, 9)]
+                measured_grid[row_index, col_index] = measured
+                terrain_grid[row_index, col_index] = terrain
+                error_grid[row_index, col_index] = error
+            if np.all(np.isfinite(measured_grid)):
+                x_mesh, y_mesh = np.meshgrid(
+                    np.asarray(x_values, dtype=float), np.asarray(y_values, dtype=float)
+                )
+                base_x = (
+                    self.calibration.reflector_x_m
+                    if self.calibration.reflector_x_m > 0
+                    else area.y_length_m / 2.0
+                )
+                plotter = TerrainPlotter(
+                    area,
+                    save_dir=save_dir,
+                    show=True,
+                    pause_s=0.0,
+                    block=True,
+                    height_limit_mm=1.0,
+                    z_axis_limit_mm=2.0,
+                    box_z_aspect=25.0,
+                )
+                output_path = plotter.plot(
+                    np.empty(0),
+                    np.empty(0),
+                    np.empty(0),
+                    row=0,
+                    col=0,
+                    scan_index=1,
+                    total_scans=1,
+                    title="CSV grid",
+                    filename=f"csv_plot_{stamp}.png",
+                    true_surface=(x_mesh, y_mesh, terrain_grid),
+                    measured_surface=(x_mesh, y_mesh, measured_grid),
+                    error_surface=(x_mesh, y_mesh, error_grid),
+                    reflector_xy=(base_x, self.calibration.reflector_y_m),
+                )
+                print(f"[plot] chart from CSV saved -> {output_path}")
+                return
+
+        x_values = []
+        y_values = []
+        z_values = []
+        row_value = 0
+        col_value = 0
+        for row in rows:
+            if str(row.get("accepted_for_scan", "")).strip().lower() in {"false", "0"}:
+                continue
+            x = self._csv_number(row, "point_x")
+            y = self._csv_number(row, "point_y")
+            z = self._csv_number(row, "point_z")
+            if x is None or y is None or z is None:
+                continue
+            x_values.append(x)
+            y_values.append(y)
+            z_values.append(z * 1000.0)
+            row_value = max(0, min(area.rows - 1, int(math.floor(y / area.block_size_m))))
+            col_value = max(0, min(area.columns - 1, int(math.floor(x / area.block_size_m))))
+
+        if not x_values:
+            print(f"[plot] no plottable point_x/point_y/point_z rows in {self.config.output_file}")
+            return
+
+        plotter = TerrainPlotter(
+            area,
+            save_dir=save_dir,
+            show=True,
+            pause_s=0.0,
+            block=True,
+            auto_limits=True,
+        )
+        output_path = plotter.plot(
+            np.asarray(x_values, dtype=float),
+            np.asarray(y_values, dtype=float),
+            np.asarray(z_values, dtype=float),
+            row=row_value,
+            col=col_value,
+            scan_index=1,
+            total_scans=1,
+            title="CSV scan",
+            filename=f"csv_plot_{stamp}.png",
+            reflector_xy=(self.calibration.reflector_x_m, self.calibration.reflector_y_m),
+        )
+        print(f"[plot] chart from CSV saved -> {output_path}")
+
     def _run_continuous(self, max_cycles: int | None) -> None:
         cycles = 0
         while self._running:
@@ -711,19 +967,31 @@ class SurfaceMappingSystem:
         controller = self.manual_scan
         cycles = 0
         applied_version = self.calibration.version
+        applied_area = controller.area
         calibration_applied = (
             self.calibration.wheel_circumference_m > 0
             and self.calibration.reflector_z_m > 0
         )
         while self._running and not controller.completed:
             controller.prompt_before_block()
+            area_changed = (
+                controller.area.x_length_m != applied_area.x_length_m
+                or controller.area.y_length_m != applied_area.y_length_m
+                or controller.area.block_size_m != applied_area.block_size_m
+                or not np.array_equal(controller.area.point_counts, applied_area.point_counts)
+            )
             self.config.area = controller.area
             if self.plotter is not None:
                 self.plotter.area = controller.area
+            session_changed = area_changed
             if not calibration_applied or controller.calibration.version != applied_version:
                 self.apply_calibration(controller.calibration)
                 calibration_applied = True
                 applied_version = controller.calibration.version
+                session_changed = True
+            if session_changed:
+                applied_area = controller.area
+                self._ensure_session()
             target = controller.current_target()
             print(
                 f"[scan] block ({target['row']}, {target['col']}) "
@@ -756,6 +1024,8 @@ class SurfaceMappingSystem:
                     )
                     self.logger.write(measurement)
                     if accepted:
+                        if self.config.session_id:
+                            session_store.record_measurement(self.config.session_id, measurement)
                         if self.config.simulate:
                             self.print_summary(cycles, measurement)
                     else:
@@ -785,22 +1055,33 @@ class SurfaceMappingSystem:
                 self.verify_devices()
             if self.config.manual_scan:
                 self._run_manual_scan(max_cycles)
+            elif self.config.simulate and self.config.show_plots:
+                self._run_simulated_grid()
             else:
                 self._run_continuous(max_cycles)
         finally:
             self.close()
+            if self.config.show_plots and self.config.simulate and not self.config.manual_scan:
+                self._plot_csv_results()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Surface Level Mapping data acquisition.")
     parser.add_argument("--simulate", action="store_true", help="use simulated sensors instead of Raspberry Pi hardware")
-    parser.add_argument("--cycles", type=int, default=None, help="stop after this many samples (simulation defaults to 20)")
+    parser.add_argument("--show", action="store_true", help="with --simulate, write a grid CSV then plot its surfaces and save the PNG")
+    parser.add_argument("--cycles", type=int, default=None, help="stop after this many samples (continuous simulation defaults to 20)")
     parser.add_argument("--output", type=Path, default=None, help="CSV output path")
     parser.add_argument("--reflector-height", type=float, default=None, help="known reflector height H_ref in metres (simulation defaults to 1.5)")
     parser.add_argument("--manual-scan", action="store_true", help="run manual reference-tracked block scanning")
-    parser.add_argument("--x-length", type=float, default=120.0, help="field X length in metres")
-    parser.add_argument("--y-length", type=float, default=56.0, help="field Y length in metres")
-    parser.add_argument("--block-size", type=float, default=8.0, help="block side length in metres")
+    parser.add_argument("--session-id", default=None, help="frontend scan session id to update while scanning")
+    parser.add_argument("--x-length", type=float, default=None, help="field X length in metres (grid --show defaults to 70)")
+    parser.add_argument("--y-length", type=float, default=None, help="field Y length in metres (grid --show defaults to 100)")
+    parser.add_argument("--block-size", type=float, default=None, help="block side length in metres (grid --show defaults to 5)")
+    parser.add_argument("--grid-step", type=float, default=5.0, help="simulated grid spacing in metres for --show")
+    parser.add_argument("--sensor-height", type=float, default=1.2, help="simulated sensor height H_true in metres")
+    parser.add_argument("--noise-on", action="store_true", help="enable simulated sensor noise")
+    parser.add_argument("--noise-scale", type=float, default=1.0, help="simulated sensor noise scale")
+    parser.add_argument("--seed", type=int, default=14, help="terrain random seed")
     parser.add_argument("--points-per-block", type=int, default=4, help="scans per block")
     parser.add_argument("--points-grid", type=str, default=None, help="semicolon-separated per-block scan counts")
     parser.add_argument("--scan-plots-dir", type=Path, default=Path("backend/data/scan_plots"))
@@ -817,6 +1098,10 @@ def main() -> None:
     try:
         reflector_height = 1.5 if args.reflector_height is None and args.simulate else args.reflector_height or 0.0
         wheel_circumference = 1.0 if args.wheel_circumference is None and args.simulate else args.wheel_circumference or 0.0
+        grid_show = args.simulate and args.show and not args.manual_scan
+        x_length = 70.0 if grid_show and args.x_length is None else (120.0 if args.x_length is None else args.x_length)
+        y_length = 100.0 if grid_show and args.y_length is None else (56.0 if args.y_length is None else args.y_length)
+        block_size = 5.0 if grid_show and args.block_size is None else (8.0 if args.block_size is None else args.block_size)
         points_per_block: int | np.ndarray = args.points_per_block
         if args.points_grid is not None:
             rows = []
@@ -825,9 +1110,9 @@ def main() -> None:
             points_per_block = np.asarray(rows, dtype=int)
 
         area = ScanAreaConfig(
-            x_length_m=args.x_length,
-            y_length_m=args.y_length,
-            block_size_m=args.block_size,
+            x_length_m=x_length,
+            y_length_m=y_length,
+            block_size_m=block_size,
             points_per_block=points_per_block,
         )
         calibration = CalibrationConfig(
@@ -850,8 +1135,15 @@ def main() -> None:
             area=area,
             calibration=calibration,
             scan_plots_dir=args.scan_plots_dir,
+            show_plots=args.show,
+            sim_grid_step_m=args.grid_step,
+            sim_sensor_height_m=args.sensor_height,
+            sim_noise_on=args.noise_on,
+            sim_noise_scale=args.noise_scale,
+            sim_seed=args.seed,
             calibration_prompts=not args.no_prompts,
             accept_prompts=not args.no_prompts,
+            session_id=args.session_id,
         )
         if args.output is not None:
             config.output_file = args.output

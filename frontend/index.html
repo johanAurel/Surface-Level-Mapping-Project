@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reflector Field Scan Console</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <h1>Reflector Field Scan</h1>
+          <p>Surface level mapping console</p>
+        </div>
+      </div>
+      <div class="session-controls">
+        <label class="field compact">
+          <span>Session</span>
+          <select id="sessionSelect" aria-label="Session"></select>
+        </label>
+        <label class="field compact grow">
+          <span>Name</span>
+          <input id="sessionName" type="text" placeholder="New session name" autocomplete="off">
+        </label>
+        <span id="statusChip" class="chip">no session</span>
+        <span id="sessionId" class="pill session-id">-</span>
+        <button id="newSessionBtn" type="button" class="btn">New scan</button>
+        <button id="saveDraftBtn" type="button" class="btn">Save draft</button>
+        <button id="refreshBtn" type="button" class="btn">Refresh</button>
+        <div id="connection" class="connection connecting" title="Backend connection">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="connectionText">connecting</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel setup-panel">
+        <div class="panel-head">
+          <h2>Field setup</h2>
+          <span id="gridInfo" class="pill">-</span>
+        </div>
+        <div class="panel-body">
+          <form id="configForm" autocomplete="off">
+            <div class="field">
+              <label for="x_length_m">x_length_m</label>
+              <input id="x_length_m" name="x_length_m" type="number" step="any">
+            </div>
+            <div class="field">
+              <label for="y_length_m">y_length_m</label>
+              <input id="y_length_m" name="y_length_m" type="number" step="any">
+            </div>
+            <div class="field">
+              <label for="block_size_m">block_size_m</label>
+              <input id="block_size_m" name="block_size_m" type="number" step="any">
+            </div>
+            <div class="field">
+              <label for="points_per_block">points_per_block</label>
+              <input id="points_per_block" name="points_per_block" type="text" placeholder="4 or 4 4; 4 4">
+            </div>
+            <div class="field">
+              <label for="reflector_height_m">reflector_height_m</label>
+              <input id="reflector_height_m" name="reflector_height_m" type="number" step="any">
+            </div>
+            <div class="field">
+              <label for="wheel_circumference_m">wheel_circumference_m</label>
+              <input id="wheel_circumference_m" name="wheel_circumference_m" type="number" step="any">
+            </div>
+            <div class="field">
+              <label for="start_x_m">start_x_m</label>
+              <input id="start_x_m" name="start_x_m" type="number" step="any">
+            </div>
+            <div class="field">
+              <label for="start_y_m">start_y_m</label>
+              <input id="start_y_m" name="start_y_m" type="number" step="any">
+            </div>
+            <div class="field">
+              <label for="start_yaw_deg">start_yaw_deg</label>
+              <input id="start_yaw_deg" name="start_yaw_deg" type="number" step="any">
+            </div>
+            <div class="field">
+              <label for="tilt_mount_offset_deg">tilt_mount_offset_deg</label>
+              <input id="tilt_mount_offset_deg" name="tilt_mount_offset_deg" type="number" step="any">
+            </div>
+          </form>
+          <div id="configErrors" class="errors" aria-live="polite"></div>
+          <div class="button-row stacked">
+            <button id="applyConfigBtn" type="button" class="btn primary">Apply scale/settings</button>
+            <button id="startWithConfigBtn" type="button" class="btn accent">Start new scan with these settings</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel field-panel">
+        <div class="panel-head row-head">
+          <div>
+            <h2>Live field</h2>
+            <p>Click, shift-click, ctrl-click, or drag to select blocks</p>
+          </div>
+          <div id="fieldSummary" class="muted">No session loaded</div>
+        </div>
+        <div id="fieldWrap" class="field-wrap">
+          <canvas id="fieldCanvas"></canvas>
+          <div id="fieldTooltip" class="tooltip" hidden></div>
+        </div>
+        <div class="legend">
+          <span><i class="swatch empty"></i>empty</span>
+          <span><i class="swatch partial"></i>partial</span>
+          <span><i class="swatch heat"></i>depth heat</span>
+          <span><i class="swatch selected"></i>selected</span>
+          <span class="axis-note">x right / y up</span>
+        </div>
+      </section>
+
+      <section class="analysis-column">
+        <div class="panel analysis-panel">
+          <div class="panel-head">
+            <h2>Depth by block</h2>
+            <p>Average depth and completion</p>
+          </div>
+          <div class="canvas-wrap compact-canvas">
+            <canvas id="overviewCanvas"></canvas>
+          </div>
+        </div>
+        <div class="panel analysis-panel">
+          <div class="panel-head row-head">
+            <div>
+              <h2>Selected depth</h2>
+              <p>depth_mm vs scan_index</p>
+            </div>
+            <div id="depthLegend" class="depth-legend"></div>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="depthCanvas"></canvas>
+          </div>
+        </div>
+        <div class="panel selected-panel">
+          <div class="panel-head">
+            <h2>Selected blocks</h2>
+            <span id="selectedCount" class="pill">0</span>
+          </div>
+          <div class="panel-body selected-body">
+            <div id="selectedList" class="selected-list"></div>
+            <div class="field">
+              <label for="demoCount">Demo scans per block</label>
+              <input id="demoCount" type="number" min="1" step="1" placeholder="target count">
+            </div>
+            <div class="button-grid">
+              <button id="rescanBtn" type="button" class="btn danger">Mark for rescan</button>
+              <button id="clearBlockBtn" type="button" class="btn danger">Clear points</button>
+              <button id="demoBtn" type="button" class="btn">Add demo scans</button>
+              <button id="completeBtn" type="button" class="btn success">Mark complete</button>
+              <button id="clearSelectionBtn" type="button" class="btn">Clear selection</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <section class="panel points-panel">
+      <div class="panel-head row-head">
+        <div>
+          <h2>Scan variables</h2>
+          <p>Inline edits save on Enter or blur</p>
+        </div>
+        <div class="table-tools">
+          <label class="inline-check"><input id="selectedOnly" type="checkbox"> Selected blocks only</label>
+          <label class="search">
+            <span>Search</span>
+            <input id="pointSearch" type="search" placeholder="id, block, source, raw..." autocomplete="off">
+          </label>
+          <span id="tableCount" class="muted">0/0 points</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="pointsTable">
+          <thead>
+            <tr>
+              <th>id</th>
+              <th>block</th>
+              <th>scan</th>
+              <th>timestamp</th>
+              <th>x_m</th>
+              <th>y_m</th>
+              <th>depth_mm</th>
+              <th>lidar_distance_m</th>
+              <th>theta_v_deg</th>
+              <th>theta_h_deg</th>
+              <th>imu_pitch_deg</th>
+              <th>yaw_deg</th>
+              <th>platform_x_m</th>
+              <th>platform_y_m</th>
+              <th>accepted</th>
+              <th>source</th>
+              <th>raw</th>
+              <th>actions</th>
+            </tr>
+          </thead>
+          <tbody id="pointsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="statusbar" aria-live="polite">
+      <span><b>Points</b> <span id="statusPoints">0</span></span>
+      <span><b>Blocks</b> <span id="statusBlocks">0/0</span></span>
+      <span><b>Updated</b> <span id="statusUpdated">-</span></span>
+      <span><b>Autosave</b> <span id="statusSave">idle</span></span>
+      <span id="errorText" class="error-text"></span>
+      <span class="status-spacer"></span>
+      <span id="statusSession">No session</span>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
