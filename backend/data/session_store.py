@@ -218,6 +218,11 @@ def _normalize_config(config: Any) -> tuple[dict[str, Any], list[list[int]], int
     return ordered, counts, rows, cols
 
 
+def block_targets(config: Any) -> tuple[list[list[int]], int, int]:
+    _, counts, rows, cols = _normalize_config(config)
+    return counts, rows, cols
+
+
 def _clamp(value: int, upper: int) -> int:
     return max(0, min(upper, value))
 
@@ -255,6 +260,8 @@ def _build_blocks(
                     "target_count": counts[row][col],
                     "status": existing.get("status", "pending") if isinstance(existing.get("status"), str) else "pending",
                     "point_ids": [],
+                    "demo_simulated_count": max(0, _as_int(existing.get("demo_simulated_count"), 0)),
+                    "demo_next_index": max(0, _as_int(existing.get("demo_next_index"), 0)),
                     "updated_at": existing.get("updated_at") if isinstance(existing.get("updated_at"), str) else timestamp,
                 }
             )
@@ -367,7 +374,7 @@ def _finalize(session: Any) -> dict[str, Any]:
             block_map[key]["point_ids"].append(point["id"])
 
     for block in blocks:
-        count = len(block["point_ids"])
+        count = len(block["point_ids"]) + _as_int(block.get("demo_simulated_count"), 0)
         target = block["target_count"]
         previous = block["status"]
         if previous == "needs_rescan" and count == 0:
@@ -472,12 +479,17 @@ def session_summary(session: dict) -> dict:
         1 for block in blocks if isinstance(block, dict) and block.get("status") == "complete"
     )
     accepted_points = sum(1 for point in points if isinstance(point, dict) and point.get("accepted") is not False)
+    accepted_points += sum(
+        max(0, _as_int(block.get("demo_simulated_count"), 0))
+        for block in blocks
+        if isinstance(block, dict)
+    )
     completion = {
         "points": accepted_points,
         "target_points": target,
         "blocks_complete": blocks_complete,
         "blocks_total": blocks_total,
-        "percent": round(100.0 * accepted_points / target, 1) if target > 0 else 0.0,
+        "percent": round(min(100.0, 100.0 * accepted_points / target), 1) if target > 0 else 0.0,
     }
     config = session.get("config")
     return {
@@ -628,6 +640,8 @@ def _clear_blocks_in_session(session: dict, keys: set[tuple[int, int]], mark_res
     ]
     for block in session.get("blocks", []):
         if isinstance(block, dict) and (_as_int(block.get("row"), -1), _as_int(block.get("col"), -1)) in keys:
+            block["demo_simulated_count"] = 0
+            block["demo_next_index"] = 0
             block["status"] = "needs_rescan" if mark_rescan else "draft"
     return session
 
@@ -670,14 +684,42 @@ def reconfigure_session(session_id: str, config_patch: dict) -> dict:
     if not isinstance(config_patch, dict):
         raise ValueError("config_patch must be an object")
     session = load_session(session_id)
-    config, _, rows, cols = _normalize_config({**session.get("config", {}), **config_patch})
+    old_config = session.get("config") if isinstance(session.get("config"), dict) else {}
+    old_blocks = session.get("blocks", [])
+    config, counts, rows, cols = _normalize_config({**old_config, **config_patch})
+    new_state: dict[tuple[int, int], dict[str, int]] = {}
     for point in session.get("points", []):
         if not isinstance(point, dict):
             continue
         row, col = _block_from_xy(_as_float(point.get("x_m")), _as_float(point.get("y_m")), config, rows, cols)
         point["block_row"] = row
         point["block_col"] = col
+        entry = new_state.setdefault((row, col), {"simulated": 0, "next_index": 0, "stored": 0})
+        entry["stored"] += 1
+    old_size = _as_float(old_config.get("block_size_m"), config["block_size_m"])
+    if old_size <= 0:
+        old_size = config["block_size_m"]
+    for block in old_blocks:
+        if not isinstance(block, dict):
+            continue
+        old_row = _as_int(block.get("row"), -1)
+        old_col = _as_int(block.get("col"), -1)
+        if old_row < 0 or old_col < 0:
+            continue
+        center_x = (old_col + 0.5) * old_size
+        center_y = (old_row + 0.5) * old_size
+        row, col = _block_from_xy(center_x, center_y, config, rows, cols)
+        entry = new_state.setdefault((row, col), {"simulated": 0, "next_index": 0, "stored": 0})
+        entry["simulated"] += max(0, _as_int(block.get("demo_simulated_count"), 0))
+        entry["next_index"] = max(entry["next_index"], max(0, _as_int(block.get("demo_next_index"), 0)))
     session["config"] = config
+    session["blocks"] = _build_blocks(config, counts, rows, cols, [], _now())
+    for block in session["blocks"]:
+        entry = new_state.get((block["row"], block["col"]))
+        if not entry:
+            continue
+        block["demo_simulated_count"] = entry["simulated"]
+        block["demo_next_index"] = max(entry["next_index"], entry["stored"])
     return _write_session(session)
 
 

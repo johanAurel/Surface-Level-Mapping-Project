@@ -6,6 +6,7 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -15,8 +16,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from backend.data.demo_simulation import (
+    DEMO_SAMPLE_LIMIT,
+    MAX_DEMO_POINTS,
+    MAX_DEMO_STORED_POINTS,
+    generate_demo_point,
+    sample_indices,
+)
 from backend.data.session_store import (
     add_point,
+    block_targets,
     clear_blocks,
     create_session,
     delete_point,
@@ -304,51 +313,85 @@ class ServerHandler(BaseHTTPRequestHandler):
         raise _NotFound("not found")
 
     def _demo(self, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        def _integer(value: Any, label: str) -> int:
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise _BadRequest(f"{label} must be an integer")
+            return value
+
         def mutate(session: dict[str, Any]) -> dict[str, Any]:
             config = session["config"]
-            size = float(config["block_size_m"])
-            rows = int(round(float(config["y_length_m"]) / size))
-            cols = int(round(float(config["x_length_m"]) / size))
-            row = body.get("block_row")
-            col = body.get("block_col")
-            if not isinstance(row, int) or isinstance(row, bool) or not isinstance(col, int) or isinstance(col, bool):
-                raise _BadRequest("block_row and block_col must be integers")
-            if not 0 <= row < rows or not 0 <= col < cols:
-                raise _BadRequest("block row/col out of range")
-            count = body.get("count", 1)
-            if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 1000:
-                raise _BadRequest("count must be between 1 and 1000")
+            counts, rows, cols = block_targets(config)
+            raw_blocks = body.get("blocks")
+            if raw_blocks is None:
+                raw_blocks = [{"row": body.get("block_row"), "col": body.get("block_col")}]
+            if not isinstance(raw_blocks, list) or not raw_blocks:
+                raise _BadRequest("blocks must be a non-empty list")
+
+            specs: list[tuple[int, int, int]] = []
+            for raw in raw_blocks:
+                if not isinstance(raw, dict):
+                    raise _BadRequest("each block must be an object")
+                row = _integer(raw.get("row"), "block_row")
+                col = _integer(raw.get("col"), "block_col")
+                if not 0 <= row < rows or not 0 <= col < cols:
+                    raise _BadRequest("block row/col out of range")
+                raw_count = raw.get("count", body.get("count"))
+                if raw_count is None:
+                    count = counts[row][col]
+                else:
+                    count = _integer(raw_count, "count")
+                    if not 1 <= count <= MAX_DEMO_POINTS:
+                        raise _BadRequest(f"count must be between 1 and {MAX_DEMO_POINTS}")
+                if count > MAX_DEMO_POINTS:
+                    raise _BadRequest(f"count must be between 1 and {MAX_DEMO_POINTS}")
+                specs.append((row, col, count))
 
             points = session.setdefault("points", [])
             if not isinstance(points, list):
                 raise _BadRequest("invalid session points")
-            existing = sum(1 for point in points if isinstance(point, dict) and point.get("block_row") == row and point.get("block_col") == col)
-            for offset in range(count):
-                index = existing + offset + 1
-                fraction = (offset + 1) / (count + 1)
-                points.append(
-                    {
-                        "id": f"demo-{index:08d}-{row:03d}-{col:03d}",
-                        "block_row": row,
-                        "block_col": col,
-                        "scan_index": index,
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
-                        "x_m": col * size + fraction * size,
-                        "y_m": row * size + (1.0 - fraction) * size,
-                        "depth_mm": 50.0 + 12.5 * index,
-                        "lidar_distance_m": 1.5,
-                        "theta_v_deg": 45.0,
-                        "theta_h_deg": 0.0,
-                        "imu_pitch_deg": 0.0,
-                        "yaw_deg": 0.0,
-                        "platform_x_m": col * size + fraction * size,
-                        "platform_y_m": row * size + (1.0 - fraction) * size,
-                        "reflector_height_m": float(config["reflector_height_m"]),
-                        "accepted": True,
-                        "source": "demo",
-                        "raw": {"demo": True, "scan": index},
-                    }
+            blocks = session.setdefault("blocks", [])
+            if not isinstance(blocks, list):
+                raise _BadRequest("invalid session blocks")
+            timestamp = datetime.now(timezone.utc).isoformat()
+            remaining_samples = max(0, MAX_DEMO_STORED_POINTS - len(points))
+
+            for row, col, count in specs:
+                if count < 1:
+                    continue
+                existing = sum(
+                    1
+                    for point in points
+                    if isinstance(point, dict) and point.get("block_row") == row and point.get("block_col") == col
                 )
+                block = next(
+                    (
+                        item
+                        for item in blocks
+                        if isinstance(item, dict) and item.get("row") == row and item.get("col") == col
+                    ),
+                    None,
+                )
+                next_index_value = block.get("demo_next_index") if isinstance(block, dict) else None
+                next_index = (
+                    max(0, next_index_value)
+                    if isinstance(next_index_value, int) and not isinstance(next_index_value, bool)
+                    else existing
+                )
+                planned_count = max(count, next_index + count, counts[row][col])
+                indices = sample_indices(count, min(DEMO_SAMPLE_LIMIT, remaining_samples))
+                for offset in indices:
+                    points.append(
+                        generate_demo_point(
+                            session["id"], config, row, col, next_index + offset, planned_count, timestamp
+                        )
+                    )
+                remaining_samples -= len(indices)
+                unsampled = count - len(indices)
+                if isinstance(block, dict):
+                    current = block.get("demo_simulated_count")
+                    current_count = current if isinstance(current, int) and not isinstance(current, bool) else 0
+                    block["demo_simulated_count"] = max(0, current_count) + unsampled
+                    block["demo_next_index"] = next_index + count
             return session
 
         return update_session(session_id, mutate)

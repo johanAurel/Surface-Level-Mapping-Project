@@ -41,7 +41,7 @@ SurfaceMappingSystem.run():
 - Validity depends on LiDAR validity; reflector mode also requires configured `reflector_height_m`.
 
 ## Note
-The acquisition path generates no continuous terrain mesh/DEM; its output is structured measurement data for downstream mapping. `python3 -m backend.data.main --simulate --show` writes a simulated grid (default 70 m x 100 m, 5 m spacing, seed 14, noise off) to CSV, then reads `point_x/point_y`, `measured_height_mm` and `error_mm` back to plot three panels and saves the chart as `backend/data/scan_plots/csv_plot_TIMESTAMP.png`. Manual block mode plots accepted scan points after each completed block and can persist them to `backend/data/sessions/` with `--session-id` for the frontend. `terrain_simulation.py` generates incremental terrain plots from a simulated true surface plus measured scan points.
+The acquisition path generates no continuous terrain mesh/DEM; its output is structured measurement data for downstream mapping. `python3 -m backend.data.main --simulate --show` writes a simulated grid (default 70 m x 100 m, 5 m spacing, seed 14, sensor noise on) to CSV, then reads `point_x/point_y`, `measured_height_mm` and `error_mm` back to plot three panels and saves the chart as `backend/data/scan_plots/csv_plot_TIMESTAMP.png`. The plotted Z axis is reconstructed height in millimetres derived from the pitch/elevation angle and slant range; the angle itself is used internally and is not plotted. Manual block mode plots accepted scan points after each completed block and can persist them to `backend/data/sessions/` with `--session-id` for the frontend. `terrain_simulation.py` generates incremental terrain plots from a simulated true surface plus measured scan points.
 
 ## Manual block scanning
 ```bash

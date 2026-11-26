@@ -1079,7 +1079,10 @@ def main() -> None:
     parser.add_argument("--block-size", type=float, default=None, help="block side length in metres (grid --show defaults to 5)")
     parser.add_argument("--grid-step", type=float, default=5.0, help="simulated grid spacing in metres for --show")
     parser.add_argument("--sensor-height", type=float, default=1.2, help="simulated sensor height H_true in metres")
-    parser.add_argument("--noise-on", action="store_true", help="enable simulated sensor noise")
+    noise_group = parser.add_mutually_exclusive_group()
+    noise_group.add_argument("--noise-on", dest="sim_noise_on", action="store_true", help="enable simulated sensor noise (default)")
+    noise_group.add_argument("--noise-off", dest="sim_noise_on", action="store_false", help="disable simulated sensor noise")
+    parser.set_defaults(sim_noise_on=True)
     parser.add_argument("--noise-scale", type=float, default=1.0, help="simulated sensor noise scale")
     parser.add_argument("--seed", type=int, default=14, help="terrain random seed")
     parser.add_argument("--points-per-block", type=int, default=4, help="scans per block")
@@ -1138,7 +1141,7 @@ def main() -> None:
             show_plots=args.show,
             sim_grid_step_m=args.grid_step,
             sim_sensor_height_m=args.sensor_height,
-            sim_noise_on=args.noise_on,
+            sim_noise_on=args.sim_noise_on,
             sim_noise_scale=args.noise_scale,
             sim_seed=args.seed,
             calibration_prompts=not args.no_prompts,

@@ -146,7 +146,8 @@
             <div id="selectedList" class="selected-list"></div>
             <div class="field">
               <label for="demoCount">Demo scans per block</label>
-              <input id="demoCount" type="number" min="1" step="1" placeholder="target count">
+              <input id="demoCount" type="number" min="1" max="1000000" step="1" placeholder="target count">
+              <div class="muted">1–1,000,000; large runs show representative samples.</div>
             </div>
             <div class="button-grid">
               <button id="rescanBtn" type="button" class="btn danger">Mark for rescan</button>

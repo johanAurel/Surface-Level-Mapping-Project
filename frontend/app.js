@@ -27,11 +27,16 @@ const state = {
     start_yaw_deg: 0,
     tilt_mount_offset_deg: 0
   },
-  metrics: { field: null, overview: null, depth: null }
+  metrics: { field: null, overview: null, depth: null },
+  renderCache: { version: "", stats: new Map(), depthRange: null, visibleKey: "", visible: null }
 };
 
 const dom = {};
 const COLORS = ["#48cae4", "#f4a261", "#4ade80", "#c084fc", "#f472b6", "#facc15", "#60a5fa", "#fb7185"];
+const MAX_DEMO_POINTS = 1000000;
+const MAX_RENDERED_FIELD_POINTS = 5000;
+const MAX_RENDERED_CHART_POINTS = 2000;
+const MAX_RENDERED_TABLE_ROWS = 500;
 const NUMERIC_FIELDS = new Set([
   "scan_index", "x_m", "y_m", "depth_mm", "lidar_distance_m", "theta_v_deg", "theta_h_deg",
   "imu_pitch_deg", "yaw_deg", "platform_x_m", "platform_y_m"
@@ -188,6 +193,7 @@ function requestRender() {
 }
 
 function render() {
+  buildRenderContext();
   renderHeader();
   renderConfig();
   renderField();
@@ -337,14 +343,66 @@ function getBlock(row, col) {
   return sessionBlocks().find((b) => Number(b.row) === Number(row) && Number(b.col) === Number(col));
 }
 
+function renderVersion() {
+  return `${state.session?.id || ""}|${state.session?.updated_at || ""}`;
+}
+
+function buildRenderContext() {
+  const version = renderVersion();
+  if (state.renderCache.version === version) return state.renderCache;
+  const stats = new Map();
+  for (const block of sessionBlocks()) {
+    const simulated = Math.max(0, Number(block.demo_simulated_count) || 0);
+    stats.set(blockKey(block.row, block.col), {
+      count: simulated,
+      representedCount: 0,
+      simulated,
+      target: Number(block.target_count) || 0,
+      completion: 0,
+      depthSum: 0,
+      depthCount: 0,
+      avgDepth: null,
+      points: []
+    });
+  }
+  let minDepth = null;
+  let maxDepth = null;
+  for (const point of sessionPoints()) {
+    const depth = Number(point.depth_mm);
+    if (Number.isFinite(depth)) {
+      if (minDepth === null || depth < minDepth) minDepth = depth;
+      if (maxDepth === null || depth > maxDepth) maxDepth = depth;
+    }
+    if (point.accepted === false) continue;
+    const stat = stats.get(blockKey(point.block_row, point.block_col));
+    if (!stat) continue;
+    stat.representedCount += 1;
+    stat.count += 1;
+    stat.points.push(point);
+    if (Number.isFinite(depth)) {
+      stat.depthSum += depth;
+      stat.depthCount += 1;
+    }
+  }
+  for (const stat of stats.values()) {
+    stat.completion = stat.target > 0 ? Math.min(1, stat.count / stat.target) : (stat.count > 0 ? 1 : 0);
+    stat.avgDepth = stat.depthCount ? stat.depthSum / stat.depthCount : null;
+    delete stat.depthSum;
+    delete stat.depthCount;
+  }
+  state.renderCache = {
+    version,
+    stats,
+    depthRange: minDepth === null ? null : { min: minDepth, max: maxDepth },
+    visibleKey: "",
+    visible: null
+  };
+  return state.renderCache;
+}
+
 function blockStats(block) {
-  const points = sessionPoints().filter((p) => Number(p.block_row) === Number(block.row) && Number(p.block_col) === Number(block.col) && p.accepted !== false);
-  const count = points.length;
-  const target = Number(block.target_count) || 0;
-  const completion = target > 0 ? Math.min(1, count / target) : (count > 0 ? 1 : 0);
-  const depths = points.map((p) => Number(p.depth_mm)).filter(Number.isFinite);
-  const avgDepth = depths.length ? depths.reduce((a, b) => a + b, 0) / depths.length : null;
-  return { count, target, completion, avgDepth, points };
+  const stats = buildRenderContext().stats.get(blockKey(block.row, block.col));
+  return stats || { count: 0, representedCount: 0, simulated: 0, target: 0, completion: 0, avgDepth: null, points: [] };
 }
 
 function blockColor(block) {
@@ -365,9 +423,7 @@ function depthToColor(depth) {
 }
 
 function depthRange() {
-  const depths = sessionPoints().map((p) => Number(p.depth_mm)).filter(Number.isFinite);
-  if (!depths.length) return null;
-  return { min: Math.min(...depths), max: Math.max(...depths) };
+  return buildRenderContext().depthRange;
 }
 
 function lerpColor(a, b, c, t) {
@@ -389,6 +445,30 @@ function hexToRgb(hex) {
 }
 
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+function samplePoints(points, limit) {
+  if (!Array.isArray(points) || points.length <= limit) return points || [];
+  if (limit <= 1) return points.length ? [points[points.length - 1]] : [];
+  const sampled = [];
+  for (let i = 0; i < limit; i++) {
+    const index = Math.round(i * (points.length - 1) / (limit - 1));
+    if (!sampled.length || index > sampled[sampled.length - 1].index) {
+      sampled.push({ index, point: points[index] });
+    }
+  }
+  return sampled.map((item) => item.point);
+}
+
+function sampleSeries(series, limit) {
+  const tagged = [];
+  series.forEach((s, seriesIndex) => {
+    s.points.forEach((point) => tagged.push({ seriesIndex, point }));
+  });
+  const chosen = samplePoints(tagged, limit);
+  const sampled = series.map((s) => ({ ...s, points: [] }));
+  chosen.forEach((item) => sampled[item.seriesIndex].points.push(item.point));
+  return sampled;
+}
 
 function canvasSize(canvas, height) {
   const rect = canvas.getBoundingClientRect();
@@ -491,7 +571,8 @@ function renderField() {
     }
   }
 
-  const points = sessionPoints();
+  const allPoints = sessionPoints();
+  const points = samplePoints(allPoints, MAX_RENDERED_FIELD_POINTS);
   for (const p of points) {
     const x = Number(p.x_m);
     const y = Number(p.y_m);
@@ -533,7 +614,10 @@ function renderField() {
   ctx.restore();
 
   const complete = blocks.filter((b) => b.status === "complete").length;
-  dom.fieldSummary.textContent = `${blocks.length} blocks, ${complete} complete, ${points.length} points`;
+  const simulated = blocks.reduce((total, b) => total + Math.max(0, Number(b.demo_simulated_count) || 0), 0);
+  const logicalPoints = allPoints.length + simulated;
+  const shown = points.length < allPoints.length ? `, ${points.length} shown` : "";
+  dom.fieldSummary.textContent = `${blocks.length} blocks, ${complete} complete, ${logicalPoints} points${shown}`;
 }
 
 function fieldBlockAtEvent(e) {
@@ -787,7 +871,8 @@ function renderDepthChart() {
     dom.depthLegend.appendChild(item);
   });
 
-  const all = series.flatMap((s) => s.points);
+  const plotted = sampleSeries(series, MAX_RENDERED_CHART_POINTS);
+  const all = plotted.flatMap((s) => s.points);
   if (!all.length) {
     ctx.fillStyle = "#6f8396";
     ctx.font = "12px sans-serif";
@@ -825,7 +910,7 @@ function renderDepthChart() {
   ctx.fillText(String(Math.round(xMax)), pad.l + innerW - 14, height - 8);
   ctx.fillText("scan_index", pad.l + innerW / 2 - 24, height - 8);
 
-  for (const s of series) {
+  for (const s of plotted) {
     if (!s.points.length) continue;
     ctx.strokeStyle = s.color;
     ctx.lineWidth = 1.8;
@@ -845,6 +930,9 @@ function renderDepthChart() {
 }
 
 function visiblePoints() {
+  const context = buildRenderContext();
+  const key = `${state.filterSelected}|${[...state.selected].sort().join(";")}|${state.search}`;
+  if (context.visibleKey === key && Array.isArray(context.visible)) return context.visible;
   let points = sessionPoints().slice();
   if (state.filterSelected && state.selected.size) {
     points = points.filter((p) => state.selected.has(blockKey(p.block_row, p.block_col)));
@@ -857,6 +945,8 @@ function visiblePoints() {
     || Number(a.block_col) - Number(b.block_col)
     || Number(a.scan_index) - Number(b.scan_index)
     || String(a.id).localeCompare(String(b.id)));
+  context.visibleKey = key;
+  context.visible = points;
   return points;
 }
 
@@ -872,9 +962,11 @@ function pointMatchesSearch(point, q) {
 function renderTable() {
   const all = sessionPoints();
   const rows = visiblePoints();
-  dom.tableCount.textContent = `${rows.length}/${all.length} points`;
+  const shown = samplePoints(rows, MAX_RENDERED_TABLE_ROWS);
+  const truncated = shown.length < rows.length ? `, showing ${shown.length}` : "";
+  dom.tableCount.textContent = `${rows.length}/${all.length} points${truncated}`;
   dom.pointsBody.innerHTML = "";
-  if (!rows.length) {
+  if (!shown.length) {
     const tr = document.createElement("tr");
     tr.className = "empty-row";
     const td = document.createElement("td");
@@ -884,7 +976,7 @@ function renderTable() {
     dom.pointsBody.appendChild(tr);
     return;
   }
-  for (const point of rows) {
+  for (const point of shown) {
     dom.pointsBody.appendChild(renderPointRow(point));
   }
 }
@@ -1251,26 +1343,30 @@ async function onAddDemo() {
   let explicitCount = null;
   if (rawCount) {
     explicitCount = Number(rawCount);
-    if (!Number.isInteger(explicitCount) || explicitCount < 1 || explicitCount > 1000) {
-      setError("Demo scans per block must be an integer from 1 to 1000");
+    if (!Number.isInteger(explicitCount) || explicitCount < 1 || explicitCount > MAX_DEMO_POINTS) {
+      setError(`Demo scans per block must be an integer from 1 to ${MAX_DEMO_POINTS.toLocaleString()}`);
       return;
     }
   }
+  const blocks = selected.map((block) => {
+    const target = Number(getBlock(block.row, block.col)?.target_count);
+    const fallback = Number.isInteger(target) && target > 0 ? target : 1;
+    const count = explicitCount === null ? fallback : explicitCount;
+    return { row: block.row, col: block.col, count };
+  });
+  if (blocks.some((block) => block.count > MAX_DEMO_POINTS)) {
+    setError(`Demo scans per block cannot exceed ${MAX_DEMO_POINTS.toLocaleString()}`);
+    return;
+  }
   setSaveState("saving");
   try {
-    let lastSession = state.session;
-    for (const block of selected) {
-      const target = getBlock(block.row, block.col)?.target_count;
-      const fallback = Number.isInteger(target) && target > 0 ? target : 1;
-      const count = explicitCount === null ? fallback : explicitCount;
-      lastSession = await api(`/api/sessions/${encodeURIComponent(state.session.id)}/demo`, {
-        method: "POST",
-        body: { block_row: block.row, block_col: block.col, count }
-      });
-    }
+    const session = await api(`/api/sessions/${encodeURIComponent(state.session.id)}/demo`, {
+      method: "POST",
+      body: { blocks }
+    });
     setSaveState("saved");
     setError("");
-    applySession(lastSession);
+    applySession(session);
   } catch (err) {
     setSaveState("error");
     setError(err.message || String(err));
@@ -1363,7 +1459,8 @@ function renderStatus() {
   const points = sessionPoints();
   const blocks = sessionBlocks();
   const complete = blocks.filter((b) => b.status === "complete").length;
-  dom.statusPoints.textContent = String(points.length);
+  const simulated = blocks.reduce((total, b) => total + Math.max(0, Number(b.demo_simulated_count) || 0), 0);
+  dom.statusPoints.textContent = String(points.length + simulated);
   dom.statusBlocks.textContent = `${complete}/${blocks.length}`;
   dom.statusUpdated.textContent = formatTime(state.lastUpdated || session?.updated_at);
   dom.statusSession.textContent = session ? `${session.name || session.id} [${session.status}]` : "No session";

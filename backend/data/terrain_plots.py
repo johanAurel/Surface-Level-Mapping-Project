@@ -137,10 +137,10 @@ class TerrainPlotter:
             ax_3d.set_ylim(*y_limits)
         ax_3d.set_xlabel("X (m)")
         ax_3d.set_ylabel("Y (m)")
-        ax_3d.set_zlabel("Height (mm)")
-        ax_3d.set_title("Terrain + measured points")
+        ax_3d.set_zlabel("Derived height Z (mm)")
+        ax_3d.set_title("Measured Z from pitch/range")
         if surface is not None:
-            fig.colorbar(surface, ax=ax_3d, shrink=0.6, label="Height (mm)")
+            fig.colorbar(surface, ax=ax_3d, shrink=0.6, label="Derived Z (mm)")
 
         ax_height = fig.add_subplot(1, 3, 2)
         height_mesh = None
@@ -165,28 +165,40 @@ class TerrainPlotter:
         ax_height.set_aspect("equal")
         ax_height.set_xlabel("X (m)")
         ax_height.set_ylabel("Y (m)")
-        ax_height.set_title("Measured height")
+        ax_height.set_title("Measured Z (derived from pitch)")
         if height_points is not None or height_mesh is not None:
-            fig.colorbar(height_points or height_mesh, ax=ax_height, label="Height (mm)")
+            fig.colorbar(height_points or height_mesh, ax=ax_height, label="Derived Z (mm)")
 
         ax_summary = fig.add_subplot(1, 3, 3)
         error_points = None
         error_mesh = None
+        max_error = 0.0
+        error_limit = 1.0
+        error_data_available = error_surface is not None or (error_plot is not None and error_plot.size > 0)
         if error_surface is not None:
             x_mesh, y_mesh, error_grid = error_surface
             finite_error = np.asarray(error_grid, dtype=float)[np.isfinite(error_grid)]
-            error_limit = max(1.0, float(np.max(np.abs(finite_error)))) if finite_error.size else 1.0
-            error_mesh = ax_summary.pcolormesh(
-                x_mesh, y_mesh, error_grid, cmap="coolwarm", shading="auto",
-                vmin=-error_limit, vmax=error_limit,
-            )
+            max_error = float(np.max(np.abs(finite_error))) if finite_error.size else 0.0
+            if max_error > 1e-9:
+                error_limit = max(max_error * 1.05, 1e-6)
+                error_mesh = ax_summary.pcolormesh(
+                    x_mesh, y_mesh, error_grid, cmap="coolwarm", shading="auto",
+                    vmin=-error_limit, vmax=error_limit,
+                )
+            else:
+                ax_summary.set_facecolor("#efefef")
         elif error_plot is not None and error_plot.size:
-            error_limit = max(1.0, float(np.nanmax(np.abs(error_plot))))
-            error_points = ax_summary.scatter(
-                x_plot, y_plot, c=error_plot, cmap="coolwarm",
-                vmin=-error_limit, vmax=error_limit, s=18,
-                edgecolor="k", linewidth=0.2, zorder=3,
-            )
+            finite_error = error_plot[np.isfinite(error_plot)]
+            max_error = float(np.max(np.abs(finite_error))) if finite_error.size else 0.0
+            if max_error > 1e-9:
+                error_limit = max(max_error * 1.05, 1e-6)
+                error_points = ax_summary.scatter(
+                    x_plot, y_plot, c=error_plot, cmap="coolwarm",
+                    vmin=-error_limit, vmax=error_limit, s=18,
+                    edgecolor="k", linewidth=0.2, zorder=3,
+                )
+            elif has_points:
+                ax_summary.scatter(x_plot, y_plot, c="tab:blue", s=18, zorder=3)
         elif has_points:
             ax_summary.scatter(x_plot, y_plot, c="tab:blue", s=18, zorder=3)
         self._add_outlines(ax_summary, row, col)
@@ -197,9 +209,17 @@ class TerrainPlotter:
         ax_summary.set_aspect("equal")
         ax_summary.set_xlabel("X (m)")
         ax_summary.set_ylabel("Y (m)")
-        ax_summary.set_title(
-            "Measurement error" if error_points is not None or error_mesh is not None else "Coverage"
-        )
+        if error_data_available:
+            ax_summary.set_title(
+                "Measurement error" if error_points is not None or error_mesh is not None else "Measurement error (zero)"
+            )
+            ax_summary.text(
+                0.02, 0.02, f"max |error| = {max_error:.4f} mm",
+                transform=ax_summary.transAxes, fontsize=9,
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.8},
+            )
+        else:
+            ax_summary.set_title("Coverage")
         if error_points is not None:
             fig.colorbar(error_points, ax=ax_summary, label="Error (mm)")
         elif error_mesh is not None:

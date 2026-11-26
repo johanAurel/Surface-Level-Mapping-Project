@@ -96,7 +96,7 @@ To simulate values into CSV, then plot that CSV and store the chart without the 
 python3 -m backend.data.main --simulate --show
 ```
 
-In this mode the simulator writes a full grid to CSV (default 70 m x 100 m field, 5 m spacing, seed 14, noise off), then reads the CSV back to plot measured height in 3D/2D and measurement error as three panels. The PNG is saved under `backend/data/scan_plots/` as `csv_plot_TIMESTAMP.png` and displayed. Use `--grid-step METRES`, `--sensor-height METRES`, `--noise-on`, `--noise-scale`, `--seed`, `--output PATH` and `--scan-plots-dir PATH` to change the simulation and outputs; `--cycles` applies only to continuous sample simulation without `--show`.
+In this mode the simulator writes a full grid to CSV (default 70 m x 100 m field, 5 m spacing, seed 14, sensor noise on), then reads the CSV back to plot derived height Z in 3D/2D and measurement error as three panels. Z is reconstructed height in millimetres from the pitch/elevation angle and slant range; the angle is used internally and is not the plotted Z axis. The PNG is saved under `backend/data/scan_plots/` as `csv_plot_TIMESTAMP.png` and displayed. Use `--grid-step METRES`, `--sensor-height METRES`, `--noise-off`, `--noise-scale`, `--seed`, `--output PATH` and `--scan-plots-dir PATH` to change the simulation and outputs; `--cycles` applies only to continuous sample simulation without `--show`.
 
 ## Manual block scanning
 `backend/data/main.py --manual-scan` runs reference-tracked scans block by block. Set field size and block size before starting; a 100 x 100 m field with 5 m blocks becomes a 20 x 20 block grid. Each block asks for a configured number of accepted scans, then saves a plot to `backend/data/scan_plots/` before moving to the next block.
