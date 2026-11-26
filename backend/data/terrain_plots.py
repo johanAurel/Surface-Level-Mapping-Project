@@ -80,13 +80,15 @@ class TerrainPlotter:
         z_arr = np.asarray(z, dtype=float)
         error_arr = None if error is None else np.asarray(error, dtype=float)
         mask = np.isfinite(x_arr) & np.isfinite(y_arr) & np.isfinite(z_arr)
-        if error_arr is not None:
-            mask &= np.isfinite(error_arr)
+        error_mask = mask & np.isfinite(error_arr) if error_arr is not None else np.zeros_like(mask)
 
         x_plot = x_arr[mask]
         y_plot = y_arr[mask]
         z_plot = z_arr[mask]
-        error_plot = None if error_arr is None else error_arr[mask]
+        error_plot = error_arr[error_mask] if error_arr is not None else None
+        error_x = x_arr[error_mask]
+        error_y = y_arr[error_mask]
+
         has_points = x_plot.size > 0
         height_surface = measured_surface if measured_surface is not None else true_surface
         scale_parts = [z_plot] if z_plot.size else []
@@ -193,7 +195,7 @@ class TerrainPlotter:
             if max_error > 1e-9:
                 error_limit = max(max_error * 1.05, 1e-6)
                 error_points = ax_summary.scatter(
-                    x_plot, y_plot, c=error_plot, cmap="coolwarm",
+                    error_x, error_y, c=error_plot, cmap="coolwarm",
                     vmin=-error_limit, vmax=error_limit, s=18,
                     edgecolor="k", linewidth=0.2, zorder=3,
                 )

@@ -209,7 +209,7 @@ class ServerHandler(BaseHTTPRequestHandler):
         if path == "/":
             path = "/index.html"
 
-        if path in {"/index.html", "/app.js", "/styles.css"}:
+        if path in {"/index.html", "/app.js", "/figure3d.js", "/styles.css"}:
             if method != "GET":
                 raise _MethodNotAllowed("GET")
             self._serve_static(path.lstrip("/"))

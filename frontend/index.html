@@ -177,6 +177,7 @@
             <label class="field compact">
               <span>Visualisation</span>
               <select id="figureMode">
+                <option value="surface">3D moving surface</option>
                 <option value="depth">Measured depth</option>
                 <option value="error">Measurement error</option>
                 <option value="coverage">Coverage</option>
@@ -189,6 +190,7 @@
                 <option value="selected">Selected blocks only</option>
               </select>
             </label>
+            <button id="figureSpinBtn" type="button" class="btn tiny">Pause rotation</button>
             <button id="figureZoomInBtn" type="button" class="btn tiny">Zoom in</button>
             <button id="figureZoomOutBtn" type="button" class="btn tiny">Zoom out</button>
             <button id="figureResetBtn" type="button" class="btn tiny">Reset view</button>
@@ -268,6 +270,7 @@
       <span id="statusSession">No session</span>
     </footer>
   </div>
+  <script src="figure3d.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

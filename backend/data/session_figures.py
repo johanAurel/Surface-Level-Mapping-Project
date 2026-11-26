@@ -13,16 +13,18 @@ from typing import Any
 import matplotlib
 
 matplotlib.use("Agg", force=True)
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Rectangle
 
 from backend.data import session_store
+from backend.data.demo_simulation import _terrain_height_mm
+from backend.data.scan_area import ScanAreaConfig
+from backend.data.terrain_plots import TerrainPlotter
 
 FIGURES_DIR = Path(__file__).parent / "session_figures"
 EXPORTS_DIR = Path(__file__).parent / "session_exports"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAX_FIGURE_POINTS = 20_000
+MAX_TERRAIN_GRID_CELLS = 20_000
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 CSV_FIELDS = (
     "id",
@@ -134,36 +136,127 @@ def _write_csv(path: Path, points: list[dict[str, Any]]) -> None:
             temp_path.unlink()
 
 
-def _draw_blocks(ax: plt.Axes, session: dict[str, Any]) -> None:
+def _area_for_session(session: dict[str, Any]) -> ScanAreaConfig:
     config = session.get("config")
     if not isinstance(config, dict):
-        return
+        raise ValueError("session config is missing")
+    x_length = _number(config.get("x_length_m"))
+    y_length = _number(config.get("y_length_m"))
     block_size = _number(config.get("block_size_m"))
-    if block_size is None or block_size <= 0:
-        return
-    blocks = session.get("blocks")
-    if not isinstance(blocks, list):
-        return
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        row = _number(block.get("row"))
-        col = _number(block.get("col"))
-        if row is None or col is None:
-            continue
-        status = block.get("status")
-        color = "#4ade80" if status == "complete" else "#fbbf24" if status == "scanning" else "#334155"
-        ax.add_patch(
-            Rectangle(
-                (col * block_size, row * block_size),
-                block_size,
-                block_size,
-                fill=False,
-                edgecolor=color,
-                linewidth=0.8,
-                alpha=0.7,
-            )
+    if None in (x_length, y_length, block_size):
+        raise ValueError("session config is incomplete")
+    points_per_block = config.get("points_per_block")
+    if isinstance(points_per_block, (list, tuple)):
+        counts = points_per_block
+    else:
+        value = _number(points_per_block)
+        if value is None:
+            raise ValueError("session config is incomplete")
+        counts = int(value)
+    return ScanAreaConfig(
+        x_length_m=x_length,
+        y_length_m=y_length,
+        block_size_m=block_size,
+        points_per_block=counts,
+    )
+
+
+def _point_terrain(point: dict[str, Any]) -> float | None:
+    raw = point.get("raw")
+    if not isinstance(raw, dict):
+        return None
+    for key in ("terrain_height_mm", "true_terrain_mm", "terrain_mm"):
+        value = _number(raw.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _grid_values(area: ScanAreaConfig, grid_step_m: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    x_points = max(2, int(round(area.x_length_m / grid_step_m)) + 1)
+    y_points = max(2, int(round(area.y_length_m / grid_step_m)) + 1)
+    while x_points * y_points > MAX_TERRAIN_GRID_CELLS:
+        grid_step_m *= 1.25
+        x_points = max(2, int(round(area.x_length_m / grid_step_m)) + 1)
+        y_points = max(2, int(round(area.y_length_m / grid_step_m)) + 1)
+    return (
+        np.linspace(0, area.x_length_m, x_points),
+        np.linspace(0, area.y_length_m, y_points),
+    )
+
+
+def _terrain_surface(
+    points: list[dict[str, Any]], area: ScanAreaConfig
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    x_values, y_values = _grid_values(area)
+    x_mesh, y_mesh = np.meshgrid(x_values, y_values)
+    if all(point.get("source") == "demo" for point in points):
+        terrain = np.array(
+            [[_terrain_height_mm(float(x), float(y)) for x in x_values] for y in y_values],
+            dtype=float,
         )
+        return x_mesh, y_mesh, terrain
+
+    terrain_values = np.array(
+        [value for point in points if (value := _point_terrain(point)) is not None], dtype=float
+    )
+    point_x = np.array(
+        [
+            value
+            for point in points
+            if _point_terrain(point) is not None and (value := _number(point.get("x_m"))) is not None
+        ],
+        dtype=float,
+    )
+    point_y = np.array(
+        [
+            value
+            for point in points
+            if _point_terrain(point) is not None and (value := _number(point.get("y_m"))) is not None
+        ],
+        dtype=float,
+    )
+    if terrain_values.size == 0 or point_x.size != terrain_values.size or point_y.size != terrain_values.size:
+        return None
+
+    terrain = np.empty_like(x_mesh, dtype=float)
+    for row in range(y_mesh.shape[0]):
+        for col in range(x_mesh.shape[1]):
+            dx = point_x - x_mesh[row, col]
+            dy = point_y - y_mesh[row, col]
+            terrain[row, col] = terrain_values[int(np.argmin(dx * dx + dy * dy))]
+    return x_mesh, y_mesh, terrain
+
+
+def _reflector_xy(points: list[dict[str, Any]], area: ScanAreaConfig) -> tuple[float, float]:
+    for point in points:
+        raw = point.get("raw")
+        if not isinstance(raw, dict):
+            continue
+        value = raw.get("reflector_xy_m")
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            x = _number(value[0])
+            y = _number(value[1])
+            if x is not None and y is not None:
+                return x, y
+        x = _number(raw.get("reflector_x_m"))
+        y = _number(raw.get("reflector_y_m"))
+        if x is not None and y is not None:
+            return x, y
+    return area.x_length_m / 2.0, 0.0
+
+
+def _last_block(session: dict[str, Any], area: ScanAreaConfig) -> tuple[int, int]:
+    blocks = session.get("blocks")
+    if isinstance(blocks, list):
+        for block in reversed(blocks):
+            if not isinstance(block, dict) or block.get("status") != "complete":
+                continue
+            row = _number(block.get("row"))
+            col = _number(block.get("col"))
+            if row is not None and col is not None:
+                return min(area.rows - 1, max(0, int(row))), min(area.columns - 1, max(0, int(col)))
+    return area.rows - 1, area.columns - 1
 
 
 def build_session_artifacts(session: dict[str, Any]) -> dict[str, Any]:
@@ -172,6 +265,7 @@ def build_session_artifacts(session: dict[str, Any]) -> dict[str, Any]:
     if not points:
         raise ValueError("no accepted points to plot")
 
+    area = _area_for_session(session)
     figure_path = figure_path_for(session_id)
     csv_path = csv_path_for(session_id)
     figure_path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,67 +275,42 @@ def build_session_artifacts(session: dict[str, Any]) -> dict[str, Any]:
     xs = np.array([_number(point.get("x_m")) for point in plotted], dtype=float)
     ys = np.array([_number(point.get("y_m")) for point in plotted], dtype=float)
     zs = np.array([_number(point.get("depth_mm")) for point in plotted], dtype=float)
-    z_limit = max(1.0, float(np.max(np.abs(zs))))
+    errors = np.array([_point_error(point) for point in plotted], dtype=float)
+    row, col = _last_block(session, area)
+    total_scans = area.rows * area.columns
 
-    fig = plt.figure(figsize=(16, 5))
-
-    ax_3d = fig.add_subplot(1, 3, 1, projection="3d")
-    scatter_3d = ax_3d.scatter(xs, ys, zs, c=zs, cmap="coolwarm", vmin=-z_limit, vmax=z_limit, s=9)
-    ax_3d.set_xlabel("X (m)")
-    ax_3d.set_ylabel("Y (m)")
-    ax_3d.set_zlabel("Depth (mm)")
-    ax_3d.set_title("Measured surface (3D)")
-    fig.colorbar(scatter_3d, ax=ax_3d, shrink=0.6, label="Depth (mm)")
-
-    ax_depth = fig.add_subplot(1, 3, 2)
-    scatter_depth = ax_depth.scatter(
-        xs, ys, c=zs, cmap="coolwarm", vmin=-z_limit, vmax=z_limit, s=12, edgecolor="k", linewidth=0.2
-    )
-    _draw_blocks(ax_depth, session)
-    ax_depth.set_aspect("equal")
-    ax_depth.set_xlabel("X (m)")
-    ax_depth.set_ylabel("Y (m)")
-    ax_depth.set_title("Measured depth")
-    fig.colorbar(scatter_depth, ax=ax_depth, label="Depth (mm)")
-
-    ax_error = fig.add_subplot(1, 3, 3)
-    error_values = [_point_error(point) for point in plotted]
-    error_x = np.array([x for x, value in zip(xs, error_values) if value is not None], dtype=float)
-    error_y = np.array([y for y, value in zip(ys, error_values) if value is not None], dtype=float)
-    error_z = np.array([value for value in error_values if value is not None], dtype=float)
-    if error_z.size:
-        error_limit = max(1e-6, float(np.max(np.abs(error_z))) * 1.05)
-        scatter_error = ax_error.scatter(
-            error_x,
-            error_y,
-            c=error_z,
-            cmap="coolwarm",
-            vmin=-error_limit,
-            vmax=error_limit,
-            s=12,
-            edgecolor="k",
-            linewidth=0.2,
-        )
-        ax_error.set_title("Measurement error")
-        fig.colorbar(scatter_error, ax=ax_error, label="Error (mm)")
-    else:
-        ax_error.scatter(xs, ys, c="#48cae4", s=12)
-        ax_error.set_title("Coverage")
-    _draw_blocks(ax_error, session)
-    ax_error.set_aspect("equal")
-    ax_error.set_xlabel("X (m)")
-    ax_error.set_ylabel("Y (m)")
-
-    fig.suptitle(f"Scan {session_id} | {len(points)} points", fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
     temp_figure_path = figure_path.with_name(f".{figure_path.name}.tmp.png")
+    plotter = TerrainPlotter(
+        area,
+        save_dir=figure_path.parent,
+        show=False,
+        pause_s=0.0,
+        grid_step_m=1.0,
+        height_limit_mm=1.0,
+        z_axis_limit_mm=2.0,
+        box_z_aspect=25.0,
+    )
     try:
-        fig.savefig(temp_figure_path, dpi=140)
+        plotter.plot(
+            xs,
+            ys,
+            zs,
+            row=row,
+            col=col,
+            scan_index=total_scans,
+            total_scans=total_scans,
+            title="Scan",
+            filename=temp_figure_path.name,
+            error=errors,
+            true_surface=_terrain_surface(plotted, area),
+            reflector_xy=_reflector_xy(plotted, area),
+        )
+        if not temp_figure_path.is_file():
+            raise RuntimeError("figure was not written")
         os.replace(temp_figure_path, figure_path)
     finally:
         if temp_figure_path.exists():
             temp_figure_path.unlink()
-        plt.close(fig)
 
     generated_at = datetime.now(timezone.utc).isoformat()
     session_data_path = session_store.session_path(session_id)

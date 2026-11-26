@@ -37,6 +37,15 @@ const state = {
     centerY: null,
     hover: null,
     drag: null,
+    rotationX: -0.45,
+    rotationY: 0.65,
+    spin: true,
+    spinTimer: null,
+    projected: [],
+    sourcePoints: [],
+    geometryKey: "",
+    geometry: null,
+    geometryPoints: null,
     generating: false,
     attemptedKey: ""
   }
@@ -47,6 +56,7 @@ const COLORS = ["#48cae4", "#f4a261", "#4ade80", "#c084fc", "#f472b6", "#facc15"
 const MAX_DEMO_POINTS = 1000000;
 const MAX_RENDERED_FIELD_POINTS = 5000;
 const MAX_RENDERED_CHART_POINTS = 2000;
+const MAX_RENDERED_3D_POINTS = 2500;
 const MAX_RENDERED_TABLE_ROWS = 500;
 const NUMERIC_FIELDS = new Set([
   "scan_index", "x_m", "y_m", "depth_mm", "lidar_distance_m", "theta_v_deg", "theta_h_deg",
@@ -113,6 +123,7 @@ function cacheDom() {
   dom.figureRegenerateBtn = document.getElementById("figureRegenerateBtn");
   dom.figureMode = document.getElementById("figureMode");
   dom.figureScope = document.getElementById("figureScope");
+  dom.figureSpinBtn = document.getElementById("figureSpinBtn");
   dom.figureZoomInBtn = document.getElementById("figureZoomInBtn");
   dom.figureZoomOutBtn = document.getElementById("figureZoomOutBtn");
   dom.figureResetBtn = document.getElementById("figureResetBtn");
@@ -151,12 +162,17 @@ function bindEvents() {
   dom.figureRegenerateBtn.addEventListener("click", onGenerateFigure);
   dom.figureMode.addEventListener("change", (e) => { state.figure.mode = e.target.value; requestRender(); });
   dom.figureScope.addEventListener("change", (e) => { state.figure.scope = e.target.value; requestRender(); });
+  dom.figureSpinBtn.addEventListener("click", () => { state.figure.spin = !state.figure.spin; requestRender(); });
   dom.figureZoomInBtn.addEventListener("click", () => zoomFigure(1.25));
   dom.figureZoomOutBtn.addEventListener("click", () => zoomFigure(0.8));
   dom.figureResetBtn.addEventListener("click", resetFigureView);
   bindFieldEvents();
   bindOverviewEvents();
   bindFigureEvents();
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && state.figure.spin && state.figure.mode === "surface" &&
+        state.figure.sourcePoints.length) startFigureSpin();
+  });
 }
 
 function bindFieldEvents() {
@@ -1599,12 +1615,17 @@ function renderFigure() {
   const session = state.session;
   const artifact = figureArtifact();
   const points = figurePoints();
+  state.figure.sourcePoints = points;
   const canConstruct = Boolean(session && points.length);
 
   dom.figureRegenerateBtn.disabled = !canConstruct || state.figure.generating;
   dom.figureRegenerateBtn.textContent = state.figure.generating
     ? "Constructing..."
     : artifact ? "Regenerate figure" : "Construct figure";
+  dom.figureSpinBtn.disabled = state.figure.mode !== "surface" || !points.length;
+  dom.figureSpinBtn.textContent = state.figure.mode !== "surface"
+    ? "3D rotation"
+    : state.figure.spin ? "Pause rotation" : "Start rotation";
   if (document.activeElement !== dom.figureMode) dom.figureMode.value = state.figure.mode;
   if (document.activeElement !== dom.figureScope) dom.figureScope.value = state.figure.scope;
 
@@ -1633,6 +1654,7 @@ function renderFigure() {
   ctx.fillStyle = "#0a1118";
   ctx.fillRect(0, 0, width, height);
   if (!session) {
+    stopFigureSpin();
     dom.figureHint.textContent = "Load or create a session to construct a figure.";
     ctx.fillStyle = "#6f8396";
     ctx.font = "13px sans-serif";
@@ -1640,6 +1662,7 @@ function renderFigure() {
     return;
   }
   if (!points.length) {
+    stopFigureSpin();
     dom.figureHint.textContent = "Add accepted scan points to construct a figure.";
     ctx.fillStyle = "#6f8396";
     ctx.font = "13px sans-serif";
@@ -1647,6 +1670,13 @@ function renderFigure() {
     return;
   }
 
+  if (state.figure.mode === "surface") {
+    dom.figureHint.textContent = "Drag to rotate, scroll to zoom, double-click to reset. Click a point to inspect it.";
+    if (state.figure.spin) startFigureSpin(); else stopFigureSpin();
+    drawFigure3D(points);
+    return;
+  }
+  stopFigureSpin();
   dom.figureHint.textContent = "Drag to pan, scroll to zoom, double-click to reset. Click a point to inspect it.";
   const m = figureMetrics();
   const errorRange = state.figure.mode === "error" ? figureErrorRange(points) : null;
@@ -1696,6 +1726,135 @@ function renderFigure() {
     ctx.arc(p.x, p.y, radius + 3, 0, Math.PI * 2);
     ctx.stroke();
   }
+}
+
+function figureProjectionOptions(points, width, height) {
+  const selectedKey = Array.from(state.selected).sort().join(",");
+  const key = `${state.session?.id || ""}|${state.session?.updated_at || ""}|${state.figure.scope}|${selectedKey}|${points.length}`;
+  let geometry;
+  if (state.figure.geometry && state.figure.geometryKey === key && state.figure.geometryPoints === points) {
+    geometry = state.figure.geometry;
+  } else {
+    const config = state.session?.config || state.config;
+    const xLen = Number(config.x_length_m) || 1;
+    const yLen = Number(config.y_length_m) || 1;
+    let minDepth = Infinity;
+    let maxDepth = -Infinity;
+    for (const point of points) {
+      const depth = Number(point.depth_mm);
+      if (!Number.isFinite(depth)) continue;
+      minDepth = Math.min(minDepth, depth);
+      maxDepth = Math.max(maxDepth, depth);
+    }
+    if (!Number.isFinite(minDepth)) {
+      minDepth = -1;
+      maxDepth = 1;
+    }
+    const zMid = (minDepth + maxDepth) / 2;
+    const halfRange = Math.max(0.001, maxDepth - zMid, zMid - minDepth);
+    const zScale = clamp(Math.max(xLen, yLen) / (6 * halfRange), 0.2, 8);
+    geometry = { xLen, yLen, zMid, zScale };
+    state.figure.geometryKey = key;
+    state.figure.geometry = geometry;
+    state.figure.geometryPoints = points;
+  }
+  return { ...geometry, width, height, rotationX: state.figure.rotationX,
+    rotationY: state.figure.rotationY, zoom: state.figure.zoom, limit: MAX_RENDERED_3D_POINTS };
+}
+
+function drawFigure3D(points) {
+  const projection = globalThis.Figure3D;
+  const { ctx, width, height } = canvasSize(dom.figureCanvas);
+  ctx.fillStyle = "#0a1118";
+  ctx.fillRect(0, 0, width, height);
+  if (!projection) {
+    ctx.fillStyle = "#6f8396";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("3D view unavailable: figure3d.js did not load.", 20, 30);
+    return;
+  }
+  const options = figureProjectionOptions(points, width, height);
+  const projectAt = (x, y, depth) => projection.project({ x_m: x, y_m: y, depth_mm: depth }, options);
+
+  ctx.strokeStyle = "#1b2a39";
+  ctx.lineWidth = 1;
+  for (let index = 0; index <= 8; index++) {
+    const gx = projectAt((options.xLen * index) / 8, 0, options.zMid);
+    const gxEnd = projectAt((options.xLen * index) / 8, options.yLen, options.zMid);
+    ctx.beginPath();
+    ctx.moveTo(gx.x, gx.y);
+    ctx.lineTo(gxEnd.x, gxEnd.y);
+    ctx.stroke();
+    const gy = projectAt(0, (options.yLen * index) / 8, options.zMid);
+    const gyEnd = projectAt(options.xLen, (options.yLen * index) / 8, options.zMid);
+    ctx.beginPath();
+    ctx.moveTo(gy.x, gy.y);
+    ctx.lineTo(gyEnd.x, gyEnd.y);
+    ctx.stroke();
+  }
+
+  const blockSize = Number(state.session?.config?.block_size_m) || 0;
+  for (const block of sessionBlocks()) {
+    const x0 = Number(block.col) * blockSize;
+    const y0 = Number(block.row) * blockSize;
+    if (!Number.isFinite(x0) || !Number.isFinite(y0)) continue;
+    const corners = [
+      projectAt(x0, y0, options.zMid),
+      projectAt(x0 + blockSize, y0, options.zMid),
+      projectAt(x0 + blockSize, y0 + blockSize, options.zMid),
+      projectAt(x0, y0 + blockSize, options.zMid)
+    ];
+    ctx.strokeStyle = block.status === "complete" ? "#3f9163" : "#2f4458";
+    ctx.lineWidth = block.status === "complete" ? 1.4 : 1;
+    ctx.beginPath();
+    corners.forEach((corner, index) => index ? ctx.lineTo(corner.x, corner.y) : ctx.moveTo(corner.x, corner.y));
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  const projected = projection.prepare(points, options);
+  state.figure.projected = projected;
+  const radius = clamp(1.8 + state.figure.zoom * 0.6, 1.6, 4.2);
+  ctx.globalAlpha = 0.9;
+  for (const entry of projected) {
+    ctx.fillStyle = figurePointColor(entry.point, null);
+    ctx.beginPath();
+    ctx.arc(entry.x, entry.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  const hovered = projected.find((entry) => entry.point === state.figure.hover);
+  if (hovered) {
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(hovered.x, hovered.y, radius + 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = "#6f8396";
+  ctx.font = "12px sans-serif";
+  ctx.fillText("3D scan surface", 16, 22);
+  ctx.fillText(`points: ${projected.length}`, width - 92, 22);
+}
+
+function startFigureSpin() {
+  if (state.figure.spinTimer) return;
+  const step = () => {
+    state.figure.spinTimer = null;
+    if (!state.figure.spin || state.figure.mode !== "surface" || document.hidden || !state.session ||
+        !state.figure.sourcePoints.length) return;
+    state.figure.rotationY += 0.0045;
+    drawFigure3D(state.figure.sourcePoints);
+    state.figure.spinTimer = requestAnimationFrame(step);
+  };
+  state.figure.spinTimer = requestAnimationFrame(step);
+}
+
+function stopFigureSpin() {
+  if (state.figure.spinTimer) cancelAnimationFrame(state.figure.spinTimer);
+  state.figure.spinTimer = null;
 }
 
 function renderFigurePaths(artifact) {
@@ -1761,6 +1920,8 @@ function resetFigureView() {
   state.figure.zoom = 1;
   state.figure.centerX = null;
   state.figure.centerY = null;
+  state.figure.rotationX = -0.45;
+  state.figure.rotationY = 0.65;
   state.figure.hover = null;
   dom.figureTooltip.hidden = true;
   requestRender();
@@ -1774,8 +1935,23 @@ function figureLocalPoint(event) {
 function onFigureMouseDown(event) {
   if (!state.session || !figurePoints().length) return;
   const local = figureLocalPoint(event);
+  if (state.figure.mode === "surface") {
+    const spinning = state.figure.spin;
+    stopFigureSpin();
+    state.figure.drag = {
+      mode: "rotate",
+      x: local.x,
+      y: local.y,
+      rotationX: state.figure.rotationX,
+      rotationY: state.figure.rotationY,
+      spinning,
+      moved: false
+    };
+    return;
+  }
   const m = figureMetrics();
   state.figure.drag = {
+    mode: "pan",
     x: local.x,
     y: local.y,
     centerX: m.centerX,
@@ -1790,6 +1966,12 @@ function onFigureDragMove(event) {
   const dx = local.x - state.figure.drag.x;
   const dy = local.y - state.figure.drag.y;
   if (Math.abs(dx) + Math.abs(dy) > 2) state.figure.drag.moved = true;
+  if (state.figure.drag.mode === "rotate") {
+    state.figure.rotationY = state.figure.drag.rotationY + dx * 0.008;
+    state.figure.rotationX = clamp(state.figure.drag.rotationX - dy * 0.008, -1.35, 1.35);
+    drawFigure3D(state.figure.sourcePoints);
+    return;
+  }
   const m = figureMetrics();
   state.figure.centerX = clamp(state.figure.drag.centerX - dx / m.scale, 0, m.xLen);
   state.figure.centerY = clamp(state.figure.drag.centerY + dy / m.scale, 0, m.yLen);
@@ -1798,22 +1980,34 @@ function onFigureDragMove(event) {
 
 function onFigureMouseUp() {
   if (!state.figure.drag) return;
+  const spinning = state.figure.drag.spinning;
   state.figure.drag = null;
+  if (state.figure.mode === "surface" && spinning) startFigureSpin();
   requestRender();
 }
 
 function onFigureMouseMove(event) {
   if (state.figure.drag) return;
   const local = figureLocalPoint(event);
-  const m = figureMetrics();
   let best = null;
-  let bestDistance = 10;
-  for (const point of visibleFigurePoints()) {
-    const p = figureWorldToCanvas(point.x_m, point.y_m, m);
-    const distance = Math.hypot(p.x - local.x, p.y - local.y);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = point;
+  let bestDistance = state.figure.mode === "surface" ? 12 : 10;
+  if (state.figure.mode === "surface") {
+    for (const entry of state.figure.projected) {
+      const distance = Math.hypot(entry.x - local.x, entry.y - local.y);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = entry.point;
+      }
+    }
+  } else {
+    const m = figureMetrics();
+    for (const point of visibleFigurePoints()) {
+      const p = figureWorldToCanvas(point.x_m, point.y_m, m);
+      const distance = Math.hypot(p.x - local.x, p.y - local.y);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = point;
+      }
     }
   }
   state.figure.hover = best;
@@ -1822,19 +2016,23 @@ function onFigureMouseMove(event) {
     requestRender();
     return;
   }
-  const error = figurePointError(best);
+  showFigureTooltip(best, local);
+  requestRender();
+}
+
+function showFigureTooltip(point, local) {
+  const error = figurePointError(point);
   dom.figureTooltip.textContent = [
-    `id: ${best.id || "-"}`,
-    `block: (${best.block_row ?? "-"}, ${best.block_col ?? "-"})`,
-    `x/y: ${best.x_m} / ${best.y_m}`,
-    `depth: ${best.depth_mm} mm`,
+    `id: ${point.id || "-"}`,
+    `block: (${point.block_row ?? "-"}, ${point.block_col ?? "-"})`,
+    `x/y: ${point.x_m} / ${point.y_m}`,
+    `depth: ${point.depth_mm} mm`,
     error === null ? null : `error: ${error} mm`
   ].filter(Boolean).join("\n");
   dom.figureTooltip.hidden = false;
   const wrapRect = dom.figureWrap.getBoundingClientRect();
   dom.figureTooltip.style.left = `${clamp(local.x + 12, 4, wrapRect.width - 240)}px`;
   dom.figureTooltip.style.top = `${clamp(local.y + 12, 4, wrapRect.height - 80)}px`;
-  requestRender();
 }
 
 function onFigureWheel(event) {
