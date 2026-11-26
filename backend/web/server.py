@@ -23,6 +23,11 @@ from backend.data.demo_simulation import (
     generate_demo_point,
     sample_indices,
 )
+from backend.data.session_figures import (
+    csv_path_for,
+    figure_path_for,
+    generate_session_artifacts,
+)
 from backend.data.session_store import (
     add_point,
     block_targets,
@@ -32,6 +37,7 @@ from backend.data.session_store import (
     list_sessions,
     load_session,
     reconfigure_session,
+    session_fingerprint,
     session_path,
     update_point,
     update_session,
@@ -189,6 +195,11 @@ class ServerHandler(BaseHTTPRequestHandler):
         raise _NotFound("not found")
 
     def _commit(self, session_id: str, session: dict[str, Any]) -> None:
+        if session.get("status") == "complete" and not session.get("artifacts"):
+            try:
+                session = generate_session_artifacts(session_id)
+            except (ValueError, OSError, RuntimeError):
+                pass
         _notify(session_id, session)
         self._send_json(200, session)
 
@@ -272,6 +283,25 @@ class ServerHandler(BaseHTTPRequestHandler):
                 return
             raise _MethodNotAllowed("GET, PATCH")
 
+        artifact_match = re.fullmatch(r"^/api/sessions/([^/]+)/(figure\.png|points\.csv)$", path)
+        if artifact_match:
+            session_id, filename = artifact_match.groups()
+            if not _ID_RE.fullmatch(session_id):
+                raise _BadRequest("invalid session id")
+            if method != "GET":
+                raise _MethodNotAllowed("GET")
+            session = load_session(session_id)
+            artifacts = session.get("artifacts")
+            artifact = artifacts.get("figure") if isinstance(artifacts, dict) else None
+            if not isinstance(artifact, dict) or artifact.get("source_fingerprint") != session_fingerprint(session):
+                raise _NotFound("artifact not found")
+            artifact_path = figure_path_for(session_id) if filename == "figure.png" else csv_path_for(session_id)
+            if not artifact_path.is_file():
+                raise _NotFound("artifact not found")
+            content_type = "image/png" if filename == "figure.png" else "text/csv; charset=utf-8"
+            self._send_bytes(200, content_type, artifact_path.read_bytes())
+            return
+
         suffix_match = re.fullmatch(r"^/api/sessions/([^/]+)/([a-z_]+)$", path)
         if suffix_match:
             session_id, action = suffix_match.groups()
@@ -293,6 +323,11 @@ class ServerHandler(BaseHTTPRequestHandler):
                 if method != "GET":
                     raise _MethodNotAllowed("GET")
                 self._stream_events(session_id)
+                return
+            if action == "figures":
+                if method != "POST":
+                    raise _MethodNotAllowed("POST")
+                self._commit(session_id, generate_session_artifacts(session_id))
                 return
             raise _NotFound("not found")
 

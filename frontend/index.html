@@ -161,6 +161,59 @@
       </section>
     </main>
 
+    <section class="panel figure-panel">
+      <div class="panel-head row-head">
+        <div>
+          <h2>Completed scan figure</h2>
+          <p id="figureSummary">Stored figure appears when a scan is complete</p>
+        </div>
+        <div class="figure-actions">
+          <button id="figureRegenerateBtn" type="button" class="btn">Construct figure</button>
+        </div>
+      </div>
+      <div class="figure-body">
+        <div class="figure-interactive">
+          <div class="figure-controls">
+            <label class="field compact">
+              <span>Visualisation</span>
+              <select id="figureMode">
+                <option value="depth">Measured depth</option>
+                <option value="error">Measurement error</option>
+                <option value="coverage">Coverage</option>
+              </select>
+            </label>
+            <label class="field compact">
+              <span>Points</span>
+              <select id="figureScope">
+                <option value="all">All blocks</option>
+                <option value="selected">Selected blocks only</option>
+              </select>
+            </label>
+            <button id="figureZoomInBtn" type="button" class="btn tiny">Zoom in</button>
+            <button id="figureZoomOutBtn" type="button" class="btn tiny">Zoom out</button>
+            <button id="figureResetBtn" type="button" class="btn tiny">Reset view</button>
+          </div>
+          <div id="figureWrap" class="figure-wrap">
+            <canvas id="figureCanvas"></canvas>
+            <div id="figureTooltip" class="tooltip" hidden></div>
+          </div>
+          <div id="figureHint" class="muted">Drag to pan, scroll to zoom, double-click to reset. Click a point to inspect it.</div>
+        </div>
+        <div class="figure-stored">
+          <div class="stored-head">
+            <h3>Stored figure</h3>
+            <span id="figureStamp" class="pill">not generated</span>
+          </div>
+          <div id="figureImageWrap" class="stored-figure">
+            <span id="figurePlaceholder" class="muted">No stored figure yet</span>
+            <img id="figureImage" src="#" alt="Stored scan figure" hidden>
+          </div>
+          <a id="figureDownload" class="btn" href="#" download hidden>Download PNG</a>
+          <div id="figurePaths" class="path-list"></div>
+        </div>
+      </div>
+    </section>
+
     <section class="panel points-panel">
       <div class="panel-head row-head">
         <div>

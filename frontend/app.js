@@ -28,7 +28,18 @@ const state = {
     tilt_mount_offset_deg: 0
   },
   metrics: { field: null, overview: null, depth: null },
-  renderCache: { version: "", stats: new Map(), depthRange: null, visibleKey: "", visible: null }
+  renderCache: { version: "", stats: new Map(), depthRange: null, visibleKey: "", visible: null },
+  figure: {
+    mode: "depth",
+    scope: "all",
+    zoom: 1,
+    centerX: null,
+    centerY: null,
+    hover: null,
+    drag: null,
+    generating: false,
+    attemptedKey: ""
+  }
 };
 
 const dom = {};
@@ -98,6 +109,23 @@ function cacheDom() {
   dom.statusSave = document.getElementById("statusSave");
   dom.errorText = document.getElementById("errorText");
   dom.statusSession = document.getElementById("statusSession");
+  dom.figureSummary = document.getElementById("figureSummary");
+  dom.figureRegenerateBtn = document.getElementById("figureRegenerateBtn");
+  dom.figureMode = document.getElementById("figureMode");
+  dom.figureScope = document.getElementById("figureScope");
+  dom.figureZoomInBtn = document.getElementById("figureZoomInBtn");
+  dom.figureZoomOutBtn = document.getElementById("figureZoomOutBtn");
+  dom.figureResetBtn = document.getElementById("figureResetBtn");
+  dom.figureWrap = document.getElementById("figureWrap");
+  dom.figureCanvas = document.getElementById("figureCanvas");
+  dom.figureTooltip = document.getElementById("figureTooltip");
+  dom.figureHint = document.getElementById("figureHint");
+  dom.figureStamp = document.getElementById("figureStamp");
+  dom.figureImageWrap = document.getElementById("figureImageWrap");
+  dom.figurePlaceholder = document.getElementById("figurePlaceholder");
+  dom.figureImage = document.getElementById("figureImage");
+  dom.figureDownload = document.getElementById("figureDownload");
+  dom.figurePaths = document.getElementById("figurePaths");
 }
 
 function bindEvents() {
@@ -120,8 +148,15 @@ function bindEvents() {
   dom.pointsBody.addEventListener("change", onTableChange);
   dom.pointsBody.addEventListener("keydown", onTableKeydown);
   dom.pointsBody.addEventListener("click", onTableClick);
+  dom.figureRegenerateBtn.addEventListener("click", onGenerateFigure);
+  dom.figureMode.addEventListener("change", (e) => { state.figure.mode = e.target.value; requestRender(); });
+  dom.figureScope.addEventListener("change", (e) => { state.figure.scope = e.target.value; requestRender(); });
+  dom.figureZoomInBtn.addEventListener("click", () => zoomFigure(1.25));
+  dom.figureZoomOutBtn.addEventListener("click", () => zoomFigure(0.8));
+  dom.figureResetBtn.addEventListener("click", resetFigureView);
   bindFieldEvents();
   bindOverviewEvents();
+  bindFigureEvents();
 }
 
 function bindFieldEvents() {
@@ -142,6 +177,17 @@ function bindOverviewEvents() {
     state.selected.add(key);
     requestRender();
   });
+}
+
+function bindFigureEvents() {
+  const canvas = dom.figureCanvas;
+  canvas.addEventListener("mousedown", onFigureMouseDown);
+  canvas.addEventListener("mousemove", onFigureMouseMove);
+  canvas.addEventListener("mouseleave", () => { state.figure.hover = null; dom.figureTooltip.hidden = true; requestRender(); });
+  canvas.addEventListener("dblclick", resetFigureView);
+  canvas.addEventListener("wheel", onFigureWheel, { passive: false });
+  window.addEventListener("mousemove", onFigureDragMove);
+  window.addEventListener("mouseup", onFigureMouseUp);
 }
 
 async function api(path, options = {}) {
@@ -200,6 +246,7 @@ function render() {
   renderSelectedPanel();
   renderDepth();
   renderTable();
+  renderFigure();
   renderStatus();
 }
 
@@ -1197,6 +1244,7 @@ function applySession(session, preserveSelection) {
     pruneSelection();
   }
   upsertSessionSummary(session);
+  maybeGenerateFigure(session);
   requestRender();
 }
 
@@ -1452,6 +1500,347 @@ function startPolling(sessionId) {
   };
   poll();
   state.pollTimer = setInterval(poll, 2000);
+}
+
+function figureArtifact(session = state.session) {
+  const artifacts = session?.artifacts;
+  if (!artifacts || typeof artifacts !== "object") return null;
+  return artifacts.figure && typeof artifacts.figure === "object" ? artifacts.figure : null;
+}
+
+function sessionPlotPoints(session = state.session) {
+  return sessionPoints().filter((point) => point && point.accepted !== false &&
+    Number.isFinite(Number(point.x_m)) && Number.isFinite(Number(point.y_m)) &&
+    Number.isFinite(Number(point.depth_mm)));
+}
+
+function figurePoints() {
+  const points = sessionPlotPoints();
+  if (state.figure.scope !== "selected" || !state.selected.size) return points;
+  return points.filter((point) => state.selected.has(blockKey(point.block_row, point.block_col)));
+}
+
+function visibleFigurePoints() {
+  const points = figurePoints();
+  if (points.length <= MAX_RENDERED_FIELD_POINTS) return points;
+  if (MAX_RENDERED_FIELD_POINTS <= 1) return points.slice(-1);
+  return Array.from({ length: MAX_RENDERED_FIELD_POINTS }, (_, index) =>
+    points[Math.round(index * (points.length - 1) / (MAX_RENDERED_FIELD_POINTS - 1))]);
+}
+
+function figurePointError(point) {
+  const raw = point.raw && typeof point.raw === "object" ? point.raw : {};
+  for (const key of ["measurement_error_mm", "error_mm", "true_error_mm"]) {
+    const value = Number(raw[key]);
+    if (raw[key] !== null && raw[key] !== "" && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+function figureErrorRange(points) {
+  let max = 0;
+  for (const point of points) {
+    const value = figurePointError(point);
+    if (value !== null) max = Math.max(max, Math.abs(value));
+  }
+  return max > 0 ? { min: -max * 1.05, max: max * 1.05 } : null;
+}
+
+function figureMetrics() {
+  const rect = dom.figureCanvas.getBoundingClientRect();
+  const width = Math.max(100, Math.floor(rect.width));
+  const height = Math.max(100, Math.floor(rect.height));
+  const config = state.session?.config || state.config;
+  const xLen = Number(config.x_length_m) || 1;
+  const yLen = Number(config.y_length_m) || 1;
+  const pad = 22;
+  const baseScale = Math.min(Math.max(1, width - pad * 2) / xLen, Math.max(1, height - pad * 2) / yLen);
+  const scale = baseScale * state.figure.zoom;
+  if (state.figure.centerX === null) state.figure.centerX = xLen / 2;
+  if (state.figure.centerY === null) state.figure.centerY = yLen / 2;
+  state.figure.centerX = clamp(state.figure.centerX, 0, xLen);
+  state.figure.centerY = clamp(state.figure.centerY, 0, yLen);
+  return { width, height, xLen, yLen, scale, centerX: state.figure.centerX, centerY: state.figure.centerY };
+}
+
+function figureWorldToCanvas(x, y, m) {
+  return {
+    x: m.width / 2 + (Number(x) - m.centerX) * m.scale,
+    y: m.height / 2 - (Number(y) - m.centerY) * m.scale
+  };
+}
+
+function figureCanvasToWorld(x, y, m) {
+  return {
+    x: m.centerX + (x - m.width / 2) / m.scale,
+    y: m.centerY - (y - m.height / 2) / m.scale
+  };
+}
+
+function figurePointColor(point, errorRange) {
+  if (state.figure.mode === "error") {
+    const value = figurePointError(point);
+    if (value === null) return "#64798d";
+    if (!errorRange) return "#48cae4";
+    const t = errorRange.max === errorRange.min ? 0.5 : (value - errorRange.min) / (errorRange.max - errorRange.min);
+    return lerpColor("#2ec4b6", "#f4a261", "#e63946", clamp(t, 0, 1));
+  }
+  if (state.figure.mode === "coverage") {
+    const block = getBlock(point.block_row, point.block_col);
+    if (block?.status === "complete") return "#4ade80";
+    if (block?.status === "needs_rescan") return "#fb7185";
+    if (block?.status === "scanning") return "#fbbf24";
+    return "#48cae4";
+  }
+  return depthToColor(Number(point.depth_mm));
+}
+
+function renderFigure() {
+  const session = state.session;
+  const artifact = figureArtifact();
+  const points = figurePoints();
+  const canConstruct = Boolean(session && points.length);
+
+  dom.figureRegenerateBtn.disabled = !canConstruct || state.figure.generating;
+  dom.figureRegenerateBtn.textContent = state.figure.generating
+    ? "Constructing..."
+    : artifact ? "Regenerate figure" : "Construct figure";
+  if (document.activeElement !== dom.figureMode) dom.figureMode.value = state.figure.mode;
+  if (document.activeElement !== dom.figureScope) dom.figureScope.value = state.figure.scope;
+
+  if (artifact) {
+    dom.figureSummary.textContent = `Stored figure from ${artifact.point_count ?? points.length} points`;
+    dom.figureStamp.textContent = formatTime(artifact.generated_at);
+    dom.figureImage.src = `${artifact.figure_url || `/api/sessions/${encodeURIComponent(session.id)}/figure.png`}?t=${encodeURIComponent(artifact.generated_at || "")}`;
+    dom.figureImage.hidden = false;
+    dom.figurePlaceholder.hidden = true;
+    dom.figureDownload.hidden = false;
+    dom.figureDownload.href = artifact.figure_url || `#`;
+    renderFigurePaths(artifact);
+  } else {
+    dom.figureSummary.textContent = session?.status === "complete" && points.length
+      ? "Scan complete - constructing stored figure"
+      : `${points.length} accepted points available for figure construction`;
+    dom.figureStamp.textContent = "not generated";
+    dom.figureImage.hidden = true;
+    dom.figureImage.removeAttribute("src");
+    dom.figurePlaceholder.hidden = false;
+    dom.figureDownload.hidden = true;
+    renderFigurePaths(null);
+  }
+
+  const { ctx, width, height } = canvasSize(dom.figureCanvas);
+  ctx.fillStyle = "#0a1118";
+  ctx.fillRect(0, 0, width, height);
+  if (!session) {
+    dom.figureHint.textContent = "Load or create a session to construct a figure.";
+    ctx.fillStyle = "#6f8396";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("Load or create a session to view the figure.", 20, 30);
+    return;
+  }
+  if (!points.length) {
+    dom.figureHint.textContent = "Add accepted scan points to construct a figure.";
+    ctx.fillStyle = "#6f8396";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("No accepted scan points to display.", 20, 30);
+    return;
+  }
+
+  dom.figureHint.textContent = "Drag to pan, scroll to zoom, double-click to reset. Click a point to inspect it.";
+  const m = figureMetrics();
+  const errorRange = state.figure.mode === "error" ? figureErrorRange(points) : null;
+  const visible = visibleFigurePoints();
+
+  ctx.strokeStyle = "#1b2a39";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 10; i++) {
+    const gx = figureWorldToCanvas((m.xLen * i) / 10, 0, m);
+    const gy = figureWorldToCanvas(0, (m.yLen * i) / 10, m);
+    ctx.beginPath();
+    ctx.moveTo(gx.x, figureWorldToCanvas(0, 0, m).y);
+    ctx.lineTo(gx.x, figureWorldToCanvas(0, m.yLen, m).y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(figureWorldToCanvas(0, 0, m).x, gy.y);
+    ctx.lineTo(figureWorldToCanvas(m.xLen, 0, m).x, gy.y);
+    ctx.stroke();
+  }
+
+  const blockSize = Number(session.config?.block_size_m) || 0;
+  for (const block of sessionBlocks()) {
+    const x0 = Number(block.col) * blockSize;
+    const y0 = Number(block.row) * blockSize;
+    if (!Number.isFinite(x0) || !Number.isFinite(y0)) continue;
+    const p0 = figureWorldToCanvas(x0, y0, m);
+    const p1 = figureWorldToCanvas(x0 + blockSize, y0 + blockSize, m);
+    ctx.strokeStyle = block.status === "complete" ? "#3f9163" : "#2f4458";
+    ctx.lineWidth = block.status === "complete" ? 1.4 : 1;
+    ctx.strokeRect(Math.min(p0.x, p1.x), Math.min(p0.y, p1.y), Math.abs(p1.x - p0.x), Math.abs(p1.y - p0.y));
+  }
+
+  const radius = clamp(2 + (state.figure.zoom - 1) * 0.8, 1.5, 5);
+  for (const point of visible) {
+    const p = figureWorldToCanvas(point.x_m, point.y_m, m);
+    ctx.fillStyle = figurePointColor(point, errorRange);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (state.figure.hover) {
+    const p = figureWorldToCanvas(state.figure.hover.x_m, state.figure.hover.y_m, m);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, radius + 3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function renderFigurePaths(artifact) {
+  dom.figurePaths.innerHTML = "";
+  const rows = artifact ? [
+    ["Session data", artifact.data_absolute_path || artifact.data_path || "-"],
+    ["Point CSV", artifact.csv_absolute_path || artifact.csv_path || "-"],
+    ["Figure PNG", artifact.figure_absolute_path || artifact.figure_path || "-"],
+    ["Generated", artifact.generated_at || "-"],
+    ["Points", String(artifact.point_count ?? "-")]
+  ] : [
+    ["Session data", state.session?.id ? `backend/data/sessions/${state.session.id}.json` : "-"],
+    ["Point CSV", "generated with the figure"],
+    ["Figure PNG", "generated with the figure"]
+  ];
+  for (const [label, value] of rows) {
+    const row = document.createElement("div");
+    const key = document.createElement("b");
+    key.textContent = `${label}: `;
+    row.appendChild(key);
+    row.appendChild(document.createTextNode(value));
+    dom.figurePaths.appendChild(row);
+  }
+}
+
+async function onGenerateFigure() {
+  if (!state.session || state.figure.generating) return;
+  state.figure.generating = true;
+  setSaveState("saving");
+  requestRender();
+  try {
+    const session = await api(`/api/sessions/${encodeURIComponent(state.session.id)}/figures`, {
+      method: "POST",
+      body: {}
+    });
+    setSaveState("saved");
+    setError("");
+    applySession(session);
+  } catch (err) {
+    setSaveState("error");
+    setError(err.message || String(err));
+  } finally {
+    state.figure.generating = false;
+    requestRender();
+  }
+}
+
+function maybeGenerateFigure(session) {
+  if (!session || session.status !== "complete" || figureArtifact(session)) return;
+  if (!sessionPlotPoints(session).length) return;
+  const key = `${session.id}|${session.updated_at}`;
+  if (state.figure.attemptedKey === key) return;
+  state.figure.attemptedKey = key;
+  onGenerateFigure();
+}
+
+function zoomFigure(factor) {
+  state.figure.zoom = clamp(state.figure.zoom * factor, 0.5, 20);
+  requestRender();
+}
+
+function resetFigureView() {
+  state.figure.zoom = 1;
+  state.figure.centerX = null;
+  state.figure.centerY = null;
+  state.figure.hover = null;
+  dom.figureTooltip.hidden = true;
+  requestRender();
+}
+
+function figureLocalPoint(event) {
+  const rect = dom.figureCanvas.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+function onFigureMouseDown(event) {
+  if (!state.session || !figurePoints().length) return;
+  const local = figureLocalPoint(event);
+  const m = figureMetrics();
+  state.figure.drag = {
+    x: local.x,
+    y: local.y,
+    centerX: m.centerX,
+    centerY: m.centerY,
+    moved: false
+  };
+}
+
+function onFigureDragMove(event) {
+  if (!state.figure.drag) return;
+  const local = figureLocalPoint(event);
+  const dx = local.x - state.figure.drag.x;
+  const dy = local.y - state.figure.drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 2) state.figure.drag.moved = true;
+  const m = figureMetrics();
+  state.figure.centerX = clamp(state.figure.drag.centerX - dx / m.scale, 0, m.xLen);
+  state.figure.centerY = clamp(state.figure.drag.centerY + dy / m.scale, 0, m.yLen);
+  requestRender();
+}
+
+function onFigureMouseUp() {
+  if (!state.figure.drag) return;
+  state.figure.drag = null;
+  requestRender();
+}
+
+function onFigureMouseMove(event) {
+  if (state.figure.drag) return;
+  const local = figureLocalPoint(event);
+  const m = figureMetrics();
+  let best = null;
+  let bestDistance = 10;
+  for (const point of visibleFigurePoints()) {
+    const p = figureWorldToCanvas(point.x_m, point.y_m, m);
+    const distance = Math.hypot(p.x - local.x, p.y - local.y);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = point;
+    }
+  }
+  state.figure.hover = best;
+  if (!best) {
+    dom.figureTooltip.hidden = true;
+    requestRender();
+    return;
+  }
+  const error = figurePointError(best);
+  dom.figureTooltip.textContent = [
+    `id: ${best.id || "-"}`,
+    `block: (${best.block_row ?? "-"}, ${best.block_col ?? "-"})`,
+    `x/y: ${best.x_m} / ${best.y_m}`,
+    `depth: ${best.depth_mm} mm`,
+    error === null ? null : `error: ${error} mm`
+  ].filter(Boolean).join("\n");
+  dom.figureTooltip.hidden = false;
+  const wrapRect = dom.figureWrap.getBoundingClientRect();
+  dom.figureTooltip.style.left = `${clamp(local.x + 12, 4, wrapRect.width - 240)}px`;
+  dom.figureTooltip.style.top = `${clamp(local.y + 12, 4, wrapRect.height - 80)}px`;
+  requestRender();
+}
+
+function onFigureWheel(event) {
+  if (!state.session || !figurePoints().length) return;
+  event.preventDefault();
+  zoomFigure(event.deltaY < 0 ? 1.15 : 0.87);
 }
 
 function renderStatus() {

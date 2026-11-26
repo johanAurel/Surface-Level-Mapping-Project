@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -63,6 +64,17 @@ _POINT_NUMERIC_FIELDS = (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def session_fingerprint(session: dict[str, Any]) -> str:
+    payload = {
+        "id": session.get("id"),
+        "config": session.get("config"),
+        "blocks": session.get("blocks"),
+        "points": session.get("points"),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _validate_id(value: Any, label: str) -> str:
@@ -416,6 +428,17 @@ def _finalize(session: Any) -> dict[str, Any]:
         "blocks": blocks,
         "points": points,
     }
+    artifacts = work.get("artifacts")
+    fingerprint = session_fingerprint(result)
+    if isinstance(artifacts, dict):
+        figure_artifact = artifacts.get("figure")
+        nested_fingerprint = figure_artifact.get("source_fingerprint") if isinstance(figure_artifact, dict) else None
+        if artifacts.get("source_fingerprint") == fingerprint or nested_fingerprint == fingerprint:
+            preserved = copy.deepcopy(artifacts)
+            preserved["source_fingerprint"] = fingerprint
+            if isinstance(preserved.get("figure"), dict):
+                preserved["figure"]["source_fingerprint"] = fingerprint
+            result["artifacts"] = preserved
     if forced_status in _SESSION_STATUSES:
         result["status"] = forced_status
     return result

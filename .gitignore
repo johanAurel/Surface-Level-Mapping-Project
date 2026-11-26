@@ -5,5 +5,7 @@ backend/data/sessions/*.json
 backend/data/sessions/.*.lock
 backend/data/scan_plots/
 backend/data/terrain_scans/
+backend/data/session_figures/
+backend/data/session_exports/
 .venv/
 .env
